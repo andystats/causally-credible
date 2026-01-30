@@ -32,7 +32,7 @@ Try the app without any installation:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/causally-credible.git
+git clone https://github.com/andystats/causally-credible.git
 cd causally-credible
 
 # Create virtual environment (recommended)
@@ -83,3 +83,6 @@ When ρ = 0, exchangeability holds and consistent estimators should recover τ. 
 ## Author
 
 Andy Wilson
+
+Email: wilson.stats@gmail.com
+website: tao-rwd.com
