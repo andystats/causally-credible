@@ -1,4 +1,6 @@
-# Credence Framework
+# Causally credible data demo (with app) 
+
+## Based on the **Credence Framework**
 
 **Generate semi-synthetic data with known causal effects to validate inference methods**
 
