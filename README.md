@@ -82,7 +82,5 @@ When ρ = 0, exchangeability holds and consistent estimators should recover τ. 
 
 ## Author
 
-Andy Wilson
-
-Email: wilson.stats@gmail.com
-website: tao-rwd.com
+**Andy Wilson**
+[wilson.stats@gmail.com](mailto:wilson.stats@gmail.com) | [tao-rwd.com](https://tao-rwd.com)
