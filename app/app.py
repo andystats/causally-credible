@@ -16,7 +16,16 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 
-from cvae_model import ConditionalVAE, encode_data, decode_samples
+# The app is deliberately thin. The three things worth understanding live in
+# their own modules so they can be read -- and tested -- without Shiny in the way:
+#   cvae_model.py  learns p(X | Z)                       (realism)
+#   dgp.py         chooses tau, rho and f(X)             (truth)
+#   realism.py     measures whether the realism is real  (evidence)
+# tests/test_tier0.py runs all three headlessly.
+from cvae_model import ConditionalVAE, encode_data, set_seed
+from dgp import PrognosticIndex, generate_cohort
+from examples import load_example
+from realism import realism_report
 
 # Set style
 sns.set_style("whitegrid")
@@ -279,7 +288,11 @@ app_ui = ui.page_fluid(
                 ui.strong("Observed confounding:"),
                 " learned from the empirical relationship ",
                 ui.tags.code("p(X|Z)"),
-                ", so generated data are realistic and near-indistinguishable from the observed sample."
+                ui.HTML(". Only \\(p(X\\mid Z)\\) is learned from your data &mdash; the outcome "
+                        "mechanism and the effect are chosen by you in Step 3. How closely the "
+                        "generated covariates match the real ones is <strong>measured in "
+                        "Step 4</strong>, against rows the model never saw, rather than asserted "
+                        "here.")
             ),
             ui.tags.li(
                 ui.strong("Unobserved confounding:"),
@@ -388,6 +401,7 @@ app_ui = ui.page_fluid(
                 ui.input_action_button("load_example", "Load Example", class_="btn-secondary")
             )
         ),
+        ui.output_ui("example_note"),
         ui.output_ui("csv_controls"),
         ui.input_action_button("process_data", "Confirm Data", class_="btn-primary"),
         ui.output_text_verbatim("data_summary")
@@ -405,9 +419,42 @@ app_ui = ui.page_fluid(
             ui.p("Interpretation: If treated and control have different covariate patterns, the model learns those differences, so generated data inherit realistic observed bias.")
         ),
 
-        ui.input_slider("epochs", "Training Epochs", min=10, max=200, value=50, step=10),
+        ui.tags.details(
+            ui.tags.summary("Why the batch size matters (and a bug this app used to have)"),
+            ui.tags.div(
+                {"class": "math-note"},
+                ui.p(ui.HTML(
+                    "Training takes <strong>one gradient step per batch</strong>. With "
+                    "<code>batch size = full dataset</code>, an epoch is a single step, so "
+                    "50 epochs means 50 steps in total &mdash; nowhere near convergence. "
+                    "That is what this app did until now, while telling you the output was "
+                    "&ldquo;near-indistinguishable&rdquo; from your data.")),
+                ui.p(ui.HTML(
+                    "Set the batch size to the full dataset and train for a few epochs to "
+                    "<em>reproduce the old behaviour</em>, then compare the realism score in "
+                    "Step 4. The failure mode is more convincing when you can see it.")),
+                ui.p(ui.HTML(
+                    "The <strong>holdout</strong> is set aside before training and never shown "
+                    "to the model. Step 4 compares synthetic data against those unseen rows, "
+                    "because a flexible generator scored against its own training data can win "
+                    "by memorising &mdash; which is both a meaningless result and a privacy risk."))
+            )
+        ),
+
+        ui.row(
+            ui.column(3, ui.input_slider("epochs", "Training Epochs",
+                                         min=1, max=400, value=150, step=1)),
+            ui.column(3, ui.input_select("batch_size", "Batch Size",
+                                         choices={"32": "32", "64": "64", "128": "128",
+                                                  "256": "256", "0": "Full dataset (the old bug)"},
+                                         selected="128")),
+            ui.column(3, ui.input_slider("holdout_frac", "Holdout Fraction",
+                                         min=0.1, max=0.5, value=0.25, step=0.05)),
+            ui.column(3, ui.input_numeric("train_seed", "Training Seed", value=1, min=0, step=1))
+        ),
         ui.input_action_button("learn_model", "Train CVAE Model", class_="btn-primary"),
-        ui.output_text_verbatim("training_output")
+        ui.output_text_verbatim("training_output"),
+        ui.output_plot("elbo_plot")
     ),
 
     # Step 3: Generate Data
@@ -427,17 +474,51 @@ app_ui = ui.page_fluid(
             )
         ),
 
+        ui.tags.details(
+            ui.tags.summary("What f(X) is, and why it is now spelled out"),
+            ui.tags.div(
+                {"class": "math-note"},
+                ui.p(ui.HTML(
+                    "\\(f(X)\\) is the <strong>prognostic index</strong>: how the observed "
+                    "covariates move the untreated outcome \\(Y(0)\\). It is the entire "
+                    "observed-confounding mechanism, so it should be a stated modelling "
+                    "choice rather than an accident.")),
+                ui.p(ui.HTML(
+                    "It previously was an accident. \\(f(X)\\) was an unweighted mean of the "
+                    "covariates <em>on their raw scale</em>, restricted to columns whose name "
+                    "contained no underscore. So earnings in dollars drowned out age in years, "
+                    "and any covariate you happened to name <code>prior_vaccine</code> was "
+                    "silently dropped &mdash; exported to you as a confounder while influencing "
+                    "nothing.")),
+                ui.p(ui.HTML(
+                    "Now every covariate is standardised first, then combined with "
+                    "<strong>weights shown in the table below</strong>. Equal weights is the "
+                    "default and means what it says. Turning the weights into a control, and "
+                    "letting the effect \\(\\tau\\) vary with \\(X\\), is the next step for "
+                    "this app."))
+            )
+        ),
+
         ui.row(
-            ui.column(4, ui.input_numeric("tau", "True ATE (τ)", value=-5, min=-100, max=100, step=0.5)),
-            ui.column(4, ui.input_numeric("rho", "Unmeasured Confounding (ρ)", value=0.0, min=0.0, max=1.0, step=0.1)),
-            ui.column(4, ui.input_numeric("n_sim", "Sample Size", value=1500, min=100, max=10000, step=100))
+            ui.column(3, ui.input_numeric("tau", "True ATE (τ)", value=-5, min=-100, max=100, step=0.5)),
+            ui.column(3, ui.input_numeric("rho", "Unmeasured Confounding (ρ)", value=0.0, min=0.0, max=1.0, step=0.1)),
+            ui.column(3, ui.input_numeric("n_sim", "Sample Size", value=1500, min=100, max=10000, step=100)),
+            ui.column(3, ui.input_numeric("gen_seed", "Generation Seed", value=7, min=0, step=1))
         ),
         ui.tags.p(
             {"class": "text-muted", "style": "font-size: 0.9em; margin-top: -10px;"},
             ui.HTML("ATE typical range: -10 to 10. ρ ranges: 0.0 (none) to 0.6+ (strong). <br><strong>Note:</strong> When ρ=0, the unobserved confounder U has zero influence and is excluded from the downloaded dataset.")
         ),
+        ui.tags.p(
+            {"class": "text-muted", "style": "font-size: 0.9em;"},
+            ui.HTML("The <strong>generation seed</strong> is separate from the training seed on "
+                    "purpose: it lets you redraw a cohort without retraining the model, or "
+                    "retrain without moving the cohort, so you always know which change caused "
+                    "what you are looking at. Same seed, same data &mdash; every time.")
+        ),
         ui.input_action_button("generate_data", "Generate Synthetic Data", class_="btn-primary"),
-        ui.output_text_verbatim("generation_output")
+        ui.output_text_verbatim("generation_output"),
+        ui.output_ui("fx_weights")
     ),
 
     # Step 4: Analyze & Export
@@ -456,6 +537,47 @@ app_ui = ui.page_fluid(
 
         ui.output_ui("analysis_results"),
         ui.output_plot("outcome_plot"),
+
+        ui.tags.hr(),
+        ui.h4("Is the synthetic data actually realistic?"),
+        ui.p(ui.HTML(
+            "Everything above rests on a claim: that these synthetic covariates resemble "
+            "your real ones. That claim used to be asserted and never checked. Here it is "
+            "measured, against the <strong>holdout rows the model never saw</strong>.")),
+
+        ui.tags.details(
+            ui.tags.summary("How to read these three numbers"),
+            ui.tags.div(
+                {"class": "math-note"},
+                ui.tags.ol(
+                    ui.tags.li(ui.HTML(
+                        "<strong>SMD</strong> &mdash; difference in means, in pooled standard "
+                        "deviations. Below 0.1 is the usual threshold for negligible.")),
+                    ui.tags.li(ui.HTML(
+                        "<strong>KS distance</strong> &mdash; the largest gap between the two "
+                        "cumulative distributions. Catches differences in spread and shape that "
+                        "a difference in means cannot.")),
+                    ui.tags.li(ui.HTML(
+                        "<strong>Discriminator AUC</strong> &mdash; a random forest is asked to "
+                        "tell real rows from synthetic ones, cross-validated so it cannot cheat "
+                        "by memorising. <strong>0.5 is the target</strong>: it means the "
+                        "generator has fooled it completely. This is the rare model you want to "
+                        "perform badly."))
+                ),
+                ui.p(ui.HTML(
+                    "Why all three: a generator can match every mean (SMD &asymp; 0) and still "
+                    "get the shapes wrong (KS large). It can match every individual "
+                    "distribution and still destroy the <em>correlations between</em> "
+                    "covariates &mdash; and only the discriminator, which sees whole rows at "
+                    "once, will catch that.")),
+                ui.p(ui.HTML(
+                    "<strong>Try this:</strong> go back to Step 2, set the batch size to "
+                    "&ldquo;Full dataset&rdquo; with 5 epochs, retrain, and regenerate. Watch "
+                    "the AUC climb toward 1.0. That is what the old version of this app was "
+                    "shipping."))
+            )
+        ),
+        ui.output_ui("realism_results"),
 
         ui.tags.hr(),
         ui.h4("Next Steps: Apply Methods from Module 4"),
@@ -508,53 +630,49 @@ app_ui = ui.page_fluid(
 def server(input, output, session):
     # Reactive values
     data_loaded = reactive.Value(None)
+    data_note = reactive.Value("")
     data_processed = reactive.Value(None)
-    cvae_model = reactive.Value(None)
-    encoded_features = reactive.Value(None)
-    sim_data = reactive.Value(None)
+    # Everything produced by Step 2 travels together in one dict: the model, the
+    # prognostic index fitted on the same rows, and the holdout the model never saw.
+    # Keeping them in a single value makes it impossible to pair a model with the
+    # wrong holdout, which is the sort of mistake that silently flatters a metric.
+    train_state = reactive.Value(None)
+    sim_data = reactive.Value(None)      # the exported frame (download / plots read this)
+    sim_extras = reactive.Value(None)    # fx, U, encoded covariates, realism report
 
-    # Load example data
+    # Load example data. The datasets themselves live in examples.py so the test
+    # suite exercises exactly what the workshop runs.
     @reactive.Effect
     @reactive.event(input.load_example)
     def _():
-        if input.example_dataset() == "lalonde":
-            try:
-                # Try to load from file if available
-                lalonde_path = Path(__file__).parent / "lalonde_nsw.csv"
-                if lalonde_path.exists():
-                    df = pd.read_csv(lalonde_path)
-                    df = df.rename(columns={"treat": "treatment", "re78": "outcome"})
-                else:
-                    # Create a minimal example if file doesn't exist
-                    df = pd.DataFrame({
-                        'treatment': np.random.binomial(1, 0.5, 100),
-                        'outcome': np.random.randn(100) * 1000 + 5000,
-                        'age': np.random.randint(18, 65, 100),
-                        'education': np.random.randint(8, 18, 100),
-                    })
-                data_loaded.set(df)
-            except Exception as e:
-                print(f"Error loading example: {e}")
-        elif input.example_dataset() == "pneumonia":
-            # Create pneumonia vaccine example similar to Module 4
-            np.random.seed(123)
-            n = 1000
-            age = np.random.normal(65, 15, n)
-            prior_pneumonia = np.random.binomial(1, 1/(1+np.exp(-(-2 + 0.03*age))), n)
-            prior_vaccine = np.random.binomial(1, 1/(1+np.exp(-(-1 + 0.02*age + 0.5*prior_pneumonia))), n)
-            # Treatment with confounding
-            treatment = np.random.binomial(1, 1/(1+np.exp(-(-2.5 + 0.025*age + 0.8*prior_pneumonia + 1.2*prior_vaccine))), n)
-            # Outcome (will be replaced by our simulation)
-            outcome = np.random.normal(0, 1, n)
-
-            df = pd.DataFrame({
-                'treatment': treatment,
-                'outcome': outcome,
-                'age': age,
-                'priorPneumonia': prior_pneumonia,
-                'priorVaccine': prior_vaccine
-            })
+        name = input.example_dataset()
+        if not name:
+            return
+        try:
+            df, note = load_example(name)
             data_loaded.set(df)
+            data_note.set(note)
+        except Exception as e:
+            data_note.set("Could not load example: {}".format(e))
+
+    @output
+    @render.ui
+    def example_note():
+        note = data_note.get()
+        if not note:
+            return None
+        # A loud warning when the dataset is not what its label claims. The LaLonde
+        # option falls back to a placeholder when app/lalonde_nsw.csv is absent, and
+        # the old app said nothing at all -- so a participant could analyse pure
+        # noise for an hour believing it was a famous evaluation dataset.
+        is_warning = note.startswith("NOT ") or note.startswith("Could not")
+        colour = "#fd7e14" if is_warning else "#1c8b4a"
+        return ui.tags.div(
+            {"class": "module-ref",
+             "style": "border-left-color: {};".format(colour)},
+            ui.HTML("<strong>{}</strong> {}".format(
+                "Heads up:" if is_warning else "Loaded:", note))
+        )
 
     # Load uploaded CSV
     @reactive.Effect
@@ -625,99 +743,243 @@ def server(input, output, session):
         if df is None:
             return
 
-        # Encode data
-        X, Z, feature_names = encode_data(
-            df,
-            outcome_col=input.outcome_col(),
-            treatment_col=input.treatment_col()
-        )
+        outcome_col = input.outcome_col()
+        treatment_col = input.treatment_col()
+        seed = int(input.train_seed())
 
-        # Train model
-        model = ConditionalVAE(input_dim=X.shape[1], latent_dim=16)
-        model.fit(X, Z, epochs=input.epochs(), lr=1e-3, verbose=True)
+        # Split BEFORE training. The holdout is the only honest yardstick for the
+        # realism check in Step 4: measured against its own training rows, a
+        # flexible generator can score well by memorising them.
+        split_rng = np.random.default_rng(seed)
+        order = split_rng.permutation(len(df))
+        n_hold = max(20, int(round(float(input.holdout_frac()) * len(df))))
+        n_hold = min(n_hold, len(df) - 20) if len(df) > 40 else max(1, len(df) // 4)
 
-        cvae_model.set(model)
-        encoded_features.set((X, Z, feature_names))
+        df_hold = df.iloc[order[:n_hold]].reset_index(drop=True)
+        df_train = df.iloc[order[n_hold:]].reset_index(drop=True)
+
+        X_train, Z_train, feature_names = encode_data(
+            df_train, outcome_col=outcome_col, treatment_col=treatment_col)
+        X_hold, _, _ = encode_data(
+            df_hold, outcome_col=outcome_col, treatment_col=treatment_col)
+
+        batch_size = int(input.batch_size())
+        batch_size = None if batch_size <= 0 else batch_size
+
+        # Seed before construction: torch draws the initial weights from its global
+        # generator at __init__ time, so seeding inside fit() would already be late.
+        set_seed(seed)
+        model = ConditionalVAE(input_dim=X_train.shape[1], latent_dim=16)
+        model.fit(X_train, Z_train, epochs=int(input.epochs()), lr=1e-3,
+                  batch_size=batch_size, seed=seed, verbose=True)
+
+        # f(X) is fitted on the same training rows, so the standardisation constants
+        # it uses come from data the model was allowed to see.
+        index = PrognosticIndex().fit(X_train, feature_names)
+
+        train_state.set({
+            'model': model, 'index': index, 'feature_names': feature_names,
+            'X_train': X_train, 'X_hold': X_hold,
+            'df_train': df_train, 'df_hold': df_hold,
+            'n_train': len(df_train), 'n_hold': len(df_hold),
+            'batch_size': batch_size, 'seed': seed,
+        })
 
     # Training output
     @output
     @render.text
     def training_output():
-        model = cvae_model.get()
-        if model is None:
+        state = train_state.get()
+        if state is None:
             return ""
-        return "CVAE training complete!"
 
-    # Generate synthetic data
+        history = state['model'].history_
+        first, last = history[0], history[-1]
+        steps_per_epoch = last['steps']
+        return (
+            "CVAE training complete.\n"
+            "  trained on {} rows, {} held out for the realism check\n"
+            "  {} epochs x {} gradient step(s) per epoch = {} steps total\n"
+            "  negative ELBO per observation: {:.4f} -> {:.4f}\n"
+            "  final split: reconstruction {:.4f} + KL {:.4f}"
+        ).format(
+            state['n_train'], state['n_hold'],
+            len(history), steps_per_epoch, len(history) * steps_per_epoch,
+            first['neg_elbo'], last['neg_elbo'], last['recon'], last['kl'])
+
+    # The training curve. Reconstruction and KL are drawn separately because the
+    # interesting behaviour is the trade-off between them: reconstruction drops
+    # quickly, then the KL term starts to resist and progress slows.
+    @output
+    @render.plot
+    def elbo_plot():
+        state = train_state.get()
+        if state is None:
+            return None
+
+        history = state['model'].history_
+        epochs = [h['epoch'] for h in history]
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
+
+        axes[0].plot(epochs, [h['neg_elbo'] for h in history],
+                     color='#4A9EFF', linewidth=2)
+        axes[0].set_title('Negative ELBO per observation (lower is better)')
+        axes[0].set_xlabel('Epoch')
+
+        axes[1].plot(epochs, [h['recon'] for h in history],
+                     color='#fd7e14', linewidth=2, label='Reconstruction')
+        axes[1].plot(epochs, [h['kl'] for h in history],
+                     color='#1c8b4a', linewidth=2, label='KL divergence')
+        axes[1].set_title('The two competing pressures')
+        axes[1].set_xlabel('Epoch')
+        axes[1].legend()
+
+        for ax in axes:
+            ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig
+
+    # Generate synthetic data. The whole data-generating process lives in dgp.py --
+    # see generate_cohort() there for the step-by-step, which is worth reading
+    # aloud in the workshop because it is the part that defines "truth".
     @reactive.Effect
     @reactive.event(input.generate_data)
     def _():
-        model = cvae_model.get()
+        state = train_state.get()
         df = data_processed.get()
-        if model is None or df is None:
+        if state is None or df is None:
             return
 
-        n = input.n_sim()
-        tau = input.tau()
-        rho = input.rho()
+        outcome_col = input.outcome_col()
+        treatment_col = input.treatment_col()
+        n = int(input.n_sim())
+        seed = int(input.gen_seed())
 
-        # Generate confounded treatment assignment
-        U = np.random.randn(n)
-        pz = df[input.treatment_col()].mean()
+        result = generate_cohort(
+            model=state['model'], index=state['index'], original_df=df,
+            feature_names=state['feature_names'], n=n,
+            tau=float(input.tau()), rho=float(input.rho()),
+            sd_y=float(df[outcome_col].std()),
+            p_treat=float(df[treatment_col].mean()),
+            outcome_col=outcome_col, treatment_col=treatment_col, seed=seed)
 
-        # Logistic function for treatment probability
-        logit_pz = np.log(pz / (1 - pz)) if pz > 0 and pz < 1 else 0
-        ps_confounded = 1 / (1 + np.exp(-(logit_pz + rho * U)))
-        z_sim = np.random.binomial(1, ps_confounded)
+        # Realism is measured on a synthetic batch the same size as the holdout, and
+        # drawn at the holdout's own treatment assignments, so the comparison is not
+        # confounded by a different treated/control mix.
+        holdout_check = generate_cohort(
+            model=state['model'], index=state['index'], original_df=df,
+            feature_names=state['feature_names'], n=len(state['X_hold']),
+            tau=float(input.tau()), rho=float(input.rho()),
+            sd_y=float(df[outcome_col].std()),
+            p_treat=float(df[treatment_col].mean()),
+            outcome_col=outcome_col, treatment_col=treatment_col, seed=seed + 1)
 
-        # Sample covariates conditional on treatment
-        X_sim = model.sample(z_sim, n_samples=n)
+        report = realism_report(state['X_hold'], holdout_check['X_encoded'],
+                                state['feature_names'], seed=seed)
 
-        # Generate outcomes
-        X_encoded, _, feature_names = encoded_features.get()
-
-        # Get numeric features
-        numeric_features = [i for i, name in enumerate(feature_names) if not any(cat in name for cat in ['_'])]
-        if len(numeric_features) > 0:
-            hX = X_sim[:, numeric_features].mean(axis=1)
-        else:
-            hX = np.zeros(n)
-
-        sdy = df[input.outcome_col()].std()
-
-        # Potential outcomes
-        y0 = hX + (0.5 * rho * U * sdy) + np.random.randn(n) * sdy
-        y1 = y0 + tau
-        y_obs = np.where(z_sim == 1, y1, y0)
-
-        # Create synthetic dataset
-        sim_df = pd.DataFrame({
-            input.outcome_col(): y_obs,
-            input.treatment_col(): z_sim,
-            'y0': y0,
-            'y1': y1,
-            'tau_true': tau
-        })
-
-        # Only include U column if rho > 0 (i.e., if U actually affects anything)
-        # When rho=0, U is generated but has zero influence, so we exclude it for clarity
-        if rho > 0:
-            sim_df['U'] = U
-
-        # Add covariates (simplified - using encoded values)
-        for i, name in enumerate(feature_names[:min(10, len(feature_names))]):
-            sim_df[f'X_{name}'] = X_sim[:, i]
-
-        sim_data.set(sim_df)
+        sim_data.set(result['data'])
+        sim_extras.set({'result': result, 'realism': report})
 
     # Generation output
     @output
     @render.text
     def generation_output():
         df = sim_data.get()
-        if df is None:
+        extras = sim_extras.get()
+        if df is None or extras is None:
             return ""
-        return f"Synthetic data generated: {len(df)} observations."
+        result = extras['result']
+        return (
+            "Synthetic data generated: {} observations, {} columns.\n"
+            "  true ATE: {:.3f}   |   treated fraction: {:.3f}\n"
+            "  all {} covariates exported in their original schema"
+        ).format(len(df), df.shape[1], result['true_ate'],
+                 float(np.mean(result['Z'])), result['decoded'].shape[1])
+
+    # The f(X) weights, shown rather than hidden. This is the observed-confounding
+    # mechanism in full: if a covariate has weight 0 it cannot confound anything.
+    @output
+    @render.ui
+    def fx_weights():
+        state = train_state.get()
+        if state is None or sim_data.get() is None:
+            return None
+
+        table = state['index'].weights_table()
+        display = table[['covariate', 'weight']].copy()
+        display['weight'] = display['weight'].map(lambda v: "{:.4f}".format(v))
+
+        return ui.TagList(
+            ui.tags.h5("f(X): how each covariate moves the untreated outcome"),
+            ui.HTML(display.to_html(index=False, border=0,
+                                    classes="table table-sm", justify="left")),
+            ui.tags.p(
+                {"class": "text-muted", "style": "font-size: 0.9em;"},
+                ui.HTML("Covariates are standardised before weighting, so these are "
+                        "comparable across variables measured in different units. "
+                        "Equal weights is the default; the old code produced weights "
+                        "that were an accident of measurement scale.")
+            )
+        )
+
+    # The realism verdict.
+    @output
+    @render.ui
+    def realism_results():
+        extras = sim_extras.get()
+        state = train_state.get()
+        if extras is None or state is None:
+            return None
+
+        report = extras['realism']
+        disc = report['discriminator']
+        covariates = report['covariates'].copy()
+
+        auc = disc['auc']
+        colour = "#1c8b4a" if auc < 0.60 else ("#fd7e14" if auc < 0.80 else "#dc3545")
+        worst = covariates.iloc[0]
+
+        display = covariates[['covariate', 'real_mean', 'synthetic_mean', 'smd', 'ks']].copy()
+        for col in ('real_mean', 'synthetic_mean', 'smd', 'ks'):
+            display[col] = display[col].map(lambda v: "{:.3f}".format(v))
+        display.columns = ['Covariate', 'Real (holdout)', 'Synthetic', 'SMD', 'KS']
+
+        return ui.TagList(
+            ui.row(
+                ui.column(4, ui.tags.div(
+                    {"class": "metric-card"},
+                    ui.tags.div({"class": "metric-label"}, "Discriminator AUC"),
+                    ui.tags.div({"class": "metric-value", "style": "color: {};".format(colour)},
+                                "{:.3f}".format(auc)),
+                    ui.tags.div({"class": "metric-label"}, "0.5 = indistinguishable")
+                )),
+                ui.column(4, ui.tags.div(
+                    {"class": "metric-card"},
+                    ui.tags.div({"class": "metric-label"}, "Largest |SMD|"),
+                    ui.tags.div({"class": "metric-value"}, "{:.3f}".format(abs(worst['smd']))),
+                    ui.tags.div({"class": "metric-label"}, str(worst['covariate']))
+                )),
+                ui.column(4, ui.tags.div(
+                    {"class": "metric-card"},
+                    ui.tags.div({"class": "metric-label"}, "Compared against"),
+                    ui.tags.div({"class": "metric-value"}, str(disc['n_real'])),
+                    ui.tags.div({"class": "metric-label"}, "held-out rows, unseen in training")
+                ))
+            ),
+            ui.tags.div(
+                {"class": "module-ref", "style": "border-left-color: {};".format(colour)},
+                ui.HTML("<strong>Verdict:</strong> {}".format(disc['interpretation']))
+            ),
+            ui.HTML(display.to_html(index=False, border=0,
+                                    classes="table table-sm", justify="left")),
+            ui.tags.p(
+                {"class": "text-muted", "style": "font-size: 0.9em;"},
+                ui.HTML("Sorted worst-first by |SMD|. Rows near the top are where the "
+                        "generator is least faithful &mdash; and therefore where a "
+                        "conclusion drawn here is least likely to transfer to your real data.")
+            )
+        )
 
     # Analysis results
     @output

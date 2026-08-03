@@ -14,7 +14,13 @@ Traditional simulation approaches use hand-specified data generating processes w
 |---------|-------------|
 | **Realism** | Learn covariate distributions p(X\|Z) from empirical data using a Conditional VAE |
 | **Truth** | Inject known treatment effects (τ) and unmeasured confounding (ρ) |
+| **Evidence** | Measure whether the realism is real, against held-out rows the model never saw |
 | **Result** | Credible benchmarks that maintain realistic data structure while providing ground truth |
+
+Note that only `p(X|Z)` is learned from your data. The outcome mechanism `f(X)` and
+the effect `τ` are chosen by the analyst — so this buys realism in the covariates
+and their relationship to treatment, not in the outcome model. That distinction is
+worth keeping in view when interpreting any benchmark built this way.
 
 ## Live App
 
@@ -62,9 +68,9 @@ See the [tutorial PDF](tutorial/tutorial.pdf) for a comprehensive walkthrough of
 The app follows a 4-step process:
 
 1. **Load Data**: Upload your CSV or use built-in examples (LaLonde NSW, Pneumonia Vaccine)
-2. **Learn Structure**: Train a Conditional VAE to model p(X|Z)
+2. **Learn Structure**: Train a Conditional VAE to model p(X|Z), holding out a slice for step 4
 3. **Generate Data**: Create synthetic data with known τ (true effect) and ρ (unmeasured confounding)
-4. **Analyze & Export**: Compare naive estimates to ground truth, download for further analysis
+4. **Analyze & Export**: Check realism against the holdout, compare naive estimates to ground truth, download
 
 ## Key Parameters
 
@@ -72,8 +78,41 @@ The app follows a 4-step process:
 |-----------|-------------|-------|
 | **τ (tau)** | True average treatment effect to inject | -10 to +10 |
 | **ρ (rho)** | Strength of unmeasured confounding | 0.0 to 1.0 |
+| **Training seed** | Seeds model initialisation and batch shuffling | any integer |
+| **Generation seed** | Seeds the cohort draw, separately from training | any integer |
 
-When ρ = 0, exchangeability holds and consistent estimators should recover τ. As ρ increases, unmeasured confounding biases all methods—useful for sensitivity analysis.
+When ρ = 0, exchangeability holds given the exported covariates and consistent
+estimators should recover τ. As ρ increases, unmeasured confounding biases all
+methods—useful for sensitivity analysis.
+
+The two seeds are deliberately separate: you can redraw a cohort without retraining,
+or retrain without moving the cohort, and know which change caused what you see.
+
+## Is the synthetic data actually realistic?
+
+Step 4 measures it rather than claiming it, comparing synthetic covariates against
+**held-out rows the generator never trained on**:
+
+| Check | What it catches |
+|-------|-----------------|
+| **Standardized mean difference** | Are the means close? |
+| **Kolmogorov–Smirnov distance** | Are the whole distributions close, not just the means? |
+| **Discriminator AUC** | Can a random forest tell real rows from synthetic ones, using all covariates jointly? |
+
+The discriminator is the strongest of the three, because it is the only one that
+sees whole rows and can therefore notice broken *correlations* between covariates.
+**AUC ≈ 0.5 is the target** — it means the generator has fooled it completely. This
+is the rare model you want to perform badly.
+
+## Verification
+
+```bash
+python3 tests/test_tier0.py
+```
+
+Runs the full pipeline headlessly on both built-in datasets and checks, among other
+things, that a correctly specified adjustment recovers τ when ρ = 0. If that fails,
+the generator is wrong and nothing downstream can be trusted.
 
 ## References
 
