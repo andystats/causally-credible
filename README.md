@@ -104,15 +104,38 @@ sees whole rows and can therefore notice broken *correlations* between covariate
 **AUC ≈ 0.5 is the target** — it means the generator has fooled it completely. This
 is the rare model you want to perform badly.
 
+## Heterogeneous effects, overlap, and the scenario grid
+
+| Control | What it does |
+|---------|--------------|
+| **κ (heterogeneity)** | Makes the effect vary across patients: τ(X) = τ₀ + κ·σ_Y·m(X). Because m is centred, **E[τ(X)] = τ₀** — turning heterogeneity on changes the spread, never the average. |
+| **λ (overlap)** | The positivity dial. 0 = a randomised trial on realistic covariates; 1 = real confounding with comfortable overlap; 3 = propensities piled up at 0 and 1. |
+| **Mechanism** | *Learned* draws Z then X\|Z (confounding inherited from your data, not adjustable). *Designed* draws X then Z\|X (confounding and overlap become dials). You cannot have both from a conditional VAE — that tension is what CausalMix's overlap regulariser addresses. |
+
+Constant τ is why the earlier version could not tell TMLE, AIPW and g-computation
+apart: with an identical effect for everyone they all recover the same number.
+
+**Step 5** crosses overlap × heterogeneity × hidden bias into a 12-cell factorial,
+holding everything else fixed so each difference has one cause — the design of the
+companion R study [`survcausal-pilot`](https://github.com/ishuryak/survcausal-pilot).
+
 ## Verification
 
 ```bash
-python3 tests/test_tier0.py
+python3 tests/test_tier0.py    # generator correctness and realism
+python3 tests/test_tier1.py    # tau(X), the overlap dial, the factorial grid
 ```
 
 Runs the full pipeline headlessly on both built-in datasets and checks, among other
 things, that a correctly specified adjustment recovers τ when ρ = 0. If that fails,
 the generator is wrong and nothing downstream can be trusted.
+
+## Development log
+
+[`devlog/devlog.pdf`](devlog/devlog.tex) — a Beamer companion to the Module 5
+tutorial that records how this app is being built, and teaches the Credence
+framework, its evolution toward CausalMix, and the connection to `survcausal-pilot`
+along the way. Build with `latexmk -pdf devlog.tex`.
 
 ## References
 

@@ -23,9 +23,10 @@ from pathlib import Path
 #   realism.py     measures whether the realism is real  (evidence)
 # tests/test_tier0.py runs all three headlessly.
 from cvae_model import ConditionalVAE, encode_data, set_seed
-from dgp import PrognosticIndex, generate_cohort
+from dgp import PrognosticIndex, EffectFunction, generate_cohort
 from examples import load_example
 from realism import realism_report
+from scenarios import run_scenario_grid, summarize_grid
 
 # Set style
 sns.set_style("whitegrid")
@@ -505,6 +506,66 @@ app_ui = ui.page_fluid(
             ui.column(3, ui.input_numeric("n_sim", "Sample Size", value=1500, min=100, max=10000, step=100)),
             ui.column(3, ui.input_numeric("gen_seed", "Generation Seed", value=7, min=0, step=1))
         ),
+
+        ui.tags.details(
+            ui.tags.summary("Effect heterogeneity, and why constant τ was holding the app back"),
+            ui.tags.div(
+                {"class": "math-note"},
+                ui.p(ui.HTML(
+                    "With a <strong>constant</strong> \\(\\tau\\), every patient benefits "
+                    "identically &mdash; and g-computation, IPW, AIPW and TMLE all recover the "
+                    "same number. Comparing them teaches only that they agree. The problem is "
+                    "not hard enough to tell them apart.")),
+                ui.p(ui.HTML(
+                    "It also makes the clinically important question unaskable. "
+                    "<em>Does this work?</em> and <em>does this work <strong>for this "
+                    "patient</strong>?</em> are different questions, and only the second needs "
+                    "\\(\\tau\\) to vary.")),
+                ui.p(ui.HTML(
+                    "$$\\tau(X) = \\tau_0 + \\kappa \\cdot \\sigma_Y \\cdot m(X)$$")),
+                ui.p(ui.HTML(
+                    "\\(m(X)\\) is centred, so \\(\\mathbb{E}[\\tau(X)] = \\tau_0\\): "
+                    "<strong>turning heterogeneity on does not move the average effect.</strong> "
+                    "The number you typed above stays the ATE; only the spread around it "
+                    "changes. That is deliberate &mdash; otherwise you could not tell a broken "
+                    "estimator from a moving target."))
+            )
+        ),
+
+        ui.tags.details(
+            ui.tags.summary("Overlap: the positivity dial, and the trade it forces"),
+            ui.tags.div(
+                {"class": "math-note"},
+                ui.p(ui.HTML(
+                    "<strong>Learned</strong> mechanism: draw \\(Z\\), then \\(X \\mid Z\\) from "
+                    "the CVAE. Confounding is inherited from your real data &mdash; realistic, "
+                    "but not adjustable.")),
+                ui.p(ui.HTML(
+                    "<strong>Designed</strong> mechanism: draw \\(X\\) first, then "
+                    "$$\\Pr(Z=1 \\mid X, U) = \\text{logistic}(\\alpha + \\lambda\\, m(X) + \\rho U).$$ "
+                    "Now \\(\\lambda\\) is a dial: 0 is a randomised trial on realistic "
+                    "covariates, 1 is real confounding with comfortable overlap, 3 piles "
+                    "propensities up at 0 and 1.")),
+                ui.p(ui.HTML(
+                    "<strong>You cannot have both.</strong> A conditional VAE gives you "
+                    "\\(p(X\\mid Z)\\); a designed propensity gives you \\(e(X)\\); they pull in "
+                    "opposite directions. Getting realistic covariates <em>and</em> a controlled "
+                    "propensity from one model is exactly what CausalMix's overlap regulariser "
+                    "is for."))
+            )
+        ),
+
+        ui.row(
+            ui.column(4, ui.input_select(
+                "mechanism", "Treatment mechanism",
+                choices={"learned": "Learned from data (not adjustable)",
+                         "designed": "Designed (overlap is a dial)"},
+                selected="designed")),
+            ui.column(4, ui.input_slider("overlap_strength", "Overlap / confounding (λ)",
+                                         min=0.0, max=4.0, value=1.0, step=0.25)),
+            ui.column(4, ui.input_slider("heterogeneity", "Effect heterogeneity (κ)",
+                                         min=0.0, max=3.0, value=0.0, step=0.25))
+        ),
         ui.tags.p(
             {"class": "text-muted", "style": "font-size: 0.9em; margin-top: -10px;"},
             ui.HTML("ATE typical range: -10 to 10. ρ ranges: 0.0 (none) to 0.6+ (strong). <br><strong>Note:</strong> When ρ=0, the unobserved confounder U has zero influence and is excluded from the downloaded dataset.")
@@ -623,6 +684,56 @@ app_ui = ui.page_fluid(
 
         ui.download_button("download_data", "Download Synthetic Dataset (.csv)", class_="btn-success"),
     ),
+
+    # Step 5: Factorial scenario grid
+    ui.tags.div(
+        {"class": "step-panel", "id": "step5"},
+        ui.h3("Step 5: Factorial Scenario Grid"),
+        ui.p(ui.HTML(
+            "One dramatic scenario can show an estimator failing. It cannot show "
+            "<em>why</em>, because several things are wrong at once. So we cross the three "
+            "axes Step 3 made independent and move one at a time.")),
+
+        ui.tags.details(
+            ui.tags.summary("The design, and where it comes from"),
+            ui.tags.div(
+                {"class": "math-note"},
+                ui.p(ui.HTML(
+                    "This borrows the design of the companion R study, "
+                    "<code>survcausal-pilot</code>, whose headline result is a 2&times;2 "
+                    "factorial crossing confounding shape with hazard shape at a single fixed "
+                    "effect size &mdash; so that any difference between cells is attributable "
+                    "to <strong>one</strong> cause. Its README puts it plainly: the alternative "
+                    "&ldquo;would change several things at once and make the cause "
+                    "ambiguous.&rdquo;")),
+                ui.tags.ul(
+                    ui.tags.li(ui.HTML("<strong>overlap (λ)</strong> &mdash; how steeply "
+                                       "treatment depends on covariates")),
+                    ui.tags.li(ui.HTML("<strong>heterogeneity (κ)</strong> &mdash; how much "
+                                       "the effect varies across patients")),
+                    ui.tags.li(ui.HTML("<strong>hidden bias (ρ)</strong> &mdash; how strongly "
+                                       "an unmeasured confounder acts"))
+                ),
+                ui.p(ui.HTML(
+                    "Watch the <strong>% extreme</strong> column. That is the positivity "
+                    "diagnostic the R pilot already computes and never varies &mdash; across "
+                    "all four of its design cells it reads 0.00000, 0.00000, 0.00036, 0.00047. "
+                    "A diagnostic that never moves teaches nothing. Here it moves, and you can "
+                    "watch estimator bias move with it."))
+            )
+        ),
+
+        ui.row(
+            ui.column(4, ui.input_numeric("grid_n", "Rows per cell", value=1500,
+                                          min=200, max=8000, step=100)),
+            ui.column(4, ui.input_numeric("grid_seed", "Grid seed", value=101, min=0, step=1)),
+            ui.column(4, ui.input_action_button("run_grid", "Run 12-cell grid",
+                                                class_="btn-primary"))
+        ),
+        ui.output_text_verbatim("grid_status"),
+        ui.output_ui("grid_results"),
+        ui.download_button("download_grid", "Download Grid (.csv)", class_="btn-success"),
+    ),
 )
 
 
@@ -639,6 +750,7 @@ def server(input, output, session):
     train_state = reactive.Value(None)
     sim_data = reactive.Value(None)      # the exported frame (download / plots read this)
     sim_extras = reactive.Value(None)    # fx, U, encoded covariates, realism report
+    grid_data = reactive.Value(None)      # the factorial scenario table
 
     # Load example data. The datasets themselves live in examples.py so the test
     # suite exercises exactly what the workshop runs.
@@ -856,13 +968,19 @@ def server(input, output, session):
         n = int(input.n_sim())
         seed = int(input.gen_seed())
 
+        effect = EffectFunction(tau0=float(input.tau()),
+                                heterogeneity=float(input.heterogeneity()))
+        mechanism = input.mechanism()
+        overlap_strength = float(input.overlap_strength())
+
         result = generate_cohort(
             model=state['model'], index=state['index'], original_df=df,
             feature_names=state['feature_names'], n=n,
             tau=float(input.tau()), rho=float(input.rho()),
             sd_y=float(df[outcome_col].std()),
             p_treat=float(df[treatment_col].mean()),
-            outcome_col=outcome_col, treatment_col=treatment_col, seed=seed)
+            outcome_col=outcome_col, treatment_col=treatment_col, seed=seed,
+            mechanism=mechanism, overlap_strength=overlap_strength, effect=effect)
 
         # Realism is measured on a synthetic batch the same size as the holdout, and
         # drawn at the holdout's own treatment assignments, so the comparison is not
@@ -890,12 +1008,23 @@ def server(input, output, session):
         if df is None or extras is None:
             return ""
         result = extras['result']
+        ov = result['overlap']
+        tau_sd = float(np.std(result['tau_true']))
+        effect_line = ("  effect: constant at {:.3f}".format(result['true_ate'])
+                       if tau_sd == 0 else
+                       "  effect: mean {:.3f}, sd {:.3f}, range [{:.3f}, {:.3f}]".format(
+                           result['true_ate'], tau_sd,
+                           float(np.min(result['tau_true'])),
+                           float(np.max(result['tau_true']))))
         return (
             "Synthetic data generated: {} observations, {} columns.\n"
-            "  true ATE: {:.3f}   |   treated fraction: {:.3f}\n"
-            "  all {} covariates exported in their original schema"
+            "  true ATE: {:.3f}   |   all {} covariates exported in original schema\n"
+            "{}\n"
+            "  propensity: [{:.3f}, {:.3f}]   treated fraction {:.3f}\n"
+            "  positivity: {:.1%} of patients at extreme propensity (<0.05 or >0.95)"
         ).format(len(df), df.shape[1], result['true_ate'],
-                 float(np.mean(result['Z'])), result['decoded'].shape[1])
+                 result['decoded'].shape[1], effect_line,
+                 ov['ps_min'], ov['ps_max'], ov['treated_frac'], ov['pct_extreme'])
 
     # The f(X) weights, shown rather than hidden. This is the observed-confounding
     # mechanism in full: if a covariate has weight 0 it cannot confound anything.
@@ -1042,6 +1171,87 @@ def server(input, output, session):
         ax.grid(True, alpha=0.3)
 
         return fig
+
+    # ---- Step 5: the factorial scenario grid --------------------------------
+    @reactive.Effect
+    @reactive.event(input.run_grid)
+    def _():
+        state = train_state.get()
+        df = data_processed.get()
+        if state is None or df is None:
+            return
+
+        outcome_col = input.outcome_col()
+        treatment_col = input.treatment_col()
+        covariates = [c for c in df.columns if c not in (outcome_col, treatment_col)]
+
+        grid = run_scenario_grid(
+            model=state['model'], index=state['index'], original_df=df,
+            feature_names=state['feature_names'],
+            sd_y=float(df[outcome_col].std()),
+            p_treat=float(df[treatment_col].mean()),
+            outcome_col=outcome_col, treatment_col=treatment_col,
+            covariates=covariates, tau0=float(input.tau()),
+            n=int(input.grid_n()), seed=int(input.grid_seed()))
+
+        grid_data.set(grid)
+
+    @output
+    @render.text
+    def grid_status():
+        grid = grid_data.get()
+        if grid is None:
+            return ""
+        return "{} cells generated. Every cell holds the generator, covariates, τ₀ and n fixed.".format(
+            len(grid))
+
+    @output
+    @render.ui
+    def grid_results():
+        grid = grid_data.get()
+        if grid is None:
+            return None
+
+        display = grid[['overlap', 'heterogeneity', 'hidden_bias', 'true_ate',
+                        'naive_bias', 'gcomp_bias', 'pct_extreme', 'cate_corr']].copy()
+        display['pct_extreme'] = display['pct_extreme'].map(lambda v: "{:.1%}".format(v))
+        display['cate_corr'] = display['cate_corr'].map(
+            lambda v: "--" if pd.isna(v) else "{:.3f}".format(v))
+        for col in ('true_ate', 'naive_bias', 'gcomp_bias'):
+            display[col] = display[col].map(lambda v: "{:+.3f}".format(v))
+        display.columns = ['Overlap', 'Effect', 'Hidden bias', 'True ATE',
+                           'Naive bias', 'g-comp bias', '% extreme', 'CATE r']
+
+        # Every sentence below is computed from the table, so the prose can never
+        # contradict the numbers it sits beside -- the same discipline the
+        # survcausal-pilot vignette applies to its own narrative.
+        lines = summarize_grid(grid)
+
+        return ui.TagList(
+            ui.HTML(display.to_html(index=False, border=0,
+                                    classes="table table-sm", justify="left")),
+            ui.tags.div(
+                {"class": "module-ref"},
+                ui.tags.ul(*[ui.tags.li(line) for line in lines])
+            ),
+            ui.tags.p(
+                {"class": "text-muted", "style": "font-size: 0.9em;"},
+                ui.HTML("<strong>CATE r</strong> is the correlation between the estimated "
+                        "and true per-patient effect &mdash; undefined when the effect is "
+                        "constant, which is precisely why constant τ made the estimator "
+                        "comparison uninformative.")
+            )
+        )
+
+    @session.download(
+        filename=lambda: f"credence_scenario_grid_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    )
+    def download_grid():
+        grid = grid_data.get()
+        if grid is None:
+            yield ""
+            return
+        yield grid.to_csv(index=False)
 
     # Download handler
     @session.download(
