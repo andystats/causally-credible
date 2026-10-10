@@ -49,6 +49,7 @@ import numpy as np
 import pandas as pd
 
 from cvae_model import decode_samples
+from schema import fitted_schema
 
 
 # ---------------------------------------------------------------------------
@@ -164,30 +165,9 @@ class PrognosticIndex(object):
 # ---------------------------------------------------------------------------
 # tau(X): the treatment effect, allowed to depend on the covariates.
 #
-# WHY CONSTANT tau WAS A REAL LIMITATION
-# --------------------------------------
-# Until now every patient benefited identically. That is comfortable but it makes
-# the app's own Step 4 uninformative: with a constant effect, g-computation, IPW,
-# AIPW and TMLE all recover the SAME number, so a participant comparing them learns
-# only that they agree. The methods cannot be told apart because the problem is not
-# hard enough to separate them.
-#
-# It also leaves the most clinically important question unaskable. "Does this drug
-# work?" and "does this drug work FOR THIS PATIENT?" are different questions, and
-# only the second one requires tau to vary.
-#
-# THE PARAMETERIZATION, AND ONE PROPERTY WORTH GUARDING
-# -----------------------------------------------------
-#     tau(X) = tau0 + kappa * sd_y * m(X)
-#
-# where m(X) is a standardized covariate index with mean ~0 and sd ~1 on the
-# training data. Because m is centred, E[tau(X)] = tau0: turning heterogeneity ON
-# DOES NOT MOVE THE AVERAGE TREATMENT EFFECT. The number the user typed into the
-# "True ATE" box stays the ATE, and only the spread around it changes.
-#
-# That property is deliberate. Without it, a participant who increased heterogeneity
-# would see the ATE drift and could not tell whether an estimator had broken or the
-# target had simply moved.
+# tau0 is the effect at the training-centered modifier value zero. The actual
+# cohort ATE is mean(tau(X)); generation may shift the modifier distribution.
+# Keeping this function fixed avoids silently redefining the estimand per batch.
 # ---------------------------------------------------------------------------
 class EffectFunction(object):
     """
@@ -221,16 +201,13 @@ def align_encoding(decoded_df, feature_names):
     Re-encode a decoded covariate frame back onto the exact training columns.
 
     After decode_samples() a categorical column holds real category labels again.
-    One-hot encoding it reproduces proper 0/1 dummies; reindexing onto
-    feature_names puts the columns back in the training order and fills in any
-    level that this particular synthetic batch happened not to draw.
+    The fitted schema reproduces proper 0/1 dummies in training order, including
+    a zero column for each known level that this synthetic batch did not draw.
 
     This is the step that guarantees the property described in the file header:
     what we export is exactly what determines the outcome.
     """
-    re_encoded = pd.get_dummies(decoded_df, drop_first=False)
-    re_encoded = re_encoded.reindex(columns=feature_names, fill_value=0)
-    return re_encoded.values.astype(np.float64)
+    return fitted_schema(feature_names).encode(decoded_df)
 
 
 def _logit(p):
@@ -247,8 +224,8 @@ def assign_treatment(n, p_treat, rho, rng):
     observed confounding is whatever the CVAE learned from the real data. Realistic,
     and completely outside our control.
 
-    rho is the strength of unmeasured confounding. U is never exported when rho = 0
-    (it influences nothing). When rho > 0 the app does export it -- not because an
+    rho is the strength of unmeasured confounding. U has no outcome effect when
+    rho = 0. The separate answer key exports it -- not because an
     analyst would ever have it, but so the workshop can demonstrate that adjusting
     for it restores the truth.
 
@@ -274,9 +251,8 @@ def assign_treatment_designed(m_ps, p_treat, rho, rng, overlap_strength):
     Here `overlap_strength` is lambda: the change in log-odds of treatment per
     standard deviation of the covariate index. It is the positivity dial.
 
-        lambda = 0    every patient has the same treatment probability. This is a
-                      randomised trial run on realistic covariates -- a genuinely
-                      useful teaching setting, not a degenerate one.
+        lambda = 0    when rho is also zero, every patient has the same treatment
+                      probability: a randomized assignment on generated covariates.
         lambda = 1    mild confounding, comfortable overlap.
         lambda = 3    strong confounding. Propensities pile up near 0 and 1, some
                       patients are almost never treated, and estimators that divide
@@ -379,7 +355,7 @@ def generate_cohort(model, index, original_df, feature_names, n, tau, rho, sd_y,
 
     Step 4 is the fundamental problem of causal inference made literal: we compute
     both potential outcomes, then throw one away. The analyst gets y_obs; we keep
-    y0, y1 and the per-patient tau in the export so the workshop can check its own
+    y0, y1 and the per-patient tau in a separate answer-key export so the workshop can check its own
     answers.
 
     MECHANISM
@@ -401,7 +377,14 @@ def generate_cohort(model, index, original_df, feature_names, n, tau, rho, sd_y,
     the survcausal-pilot R study, which seeds the cohort draw and the estimator fits
     from disjoint streams for exactly this reason.)
     """
+    if mechanism not in ('learned', 'designed'):
+        raise ValueError('Unknown treatment mechanism.')
+    if int(n) != n or n < 2 or not 0 < p_treat < 1 or not np.isfinite(sd_y) or sd_y <= 0:
+        raise ValueError('Require at least two rows, both treatment arms and positive outcome variation.')
     rng = np.random.default_rng(int(seed))
+    # Independent streams keep X and outcome noise fixed across designed contrasts.
+    treatment_rng = np.random.default_rng(np.random.SeedSequence([int(seed), 1]))
+    outcome_rng = np.random.default_rng(np.random.SeedSequence([int(seed), 2]))
 
     if mechanism == 'designed':
         # Covariates first. They are drawn at a coin-flip arm purely to give the
@@ -412,9 +395,9 @@ def generate_cohort(model, index, original_df, feature_names, n, tau, rho, sd_y,
             model, index, original_df, feature_names, Z_seed, rng, seed,
             outcome_col, treatment_col, sample_categories)
         m_ps = index.standardized(X_final)
-        Z, U, ps = assign_treatment_designed(m_ps, p_treat, rho, rng, overlap_strength)
+        Z, U, ps = assign_treatment_designed(m_ps, p_treat, rho, treatment_rng, overlap_strength)
     else:
-        Z, U, ps = assign_treatment(n, p_treat, rho, rng)
+        Z, U, ps = assign_treatment(n, p_treat, rho, treatment_rng)
         decoded, X_final = _draw_covariates(
             model, index, original_df, feature_names, Z, rng, seed,
             outcome_col, treatment_col, sample_categories)
@@ -422,7 +405,7 @@ def generate_cohort(model, index, original_df, feature_names, n, tau, rho, sd_y,
     fx = index.transform(X_final, sd_y)
     tau_i = effect.transform(X_final, sd_y, index) if effect is not None else tau
 
-    y0, y1 = potential_outcomes(fx, U, tau_i, rho, sd_y, rng, gamma=gamma)
+    y0, y1 = potential_outcomes(fx, U, tau_i, rho, sd_y, outcome_rng, gamma=gamma)
     y_obs = np.where(Z == 1, y1, y0)
 
     out = pd.DataFrame({outcome_col: y_obs, treatment_col: Z})
@@ -432,24 +415,30 @@ def generate_cohort(model, index, original_df, feature_names, n, tau, rho, sd_y,
     for col in decoded.columns:
         out[col] = decoded[col].values
 
-    out['y0'] = y0
-    out['y1'] = y1
-    # Per-patient truth. When the effect is constant this column is constant, so
-    # nothing downstream has to know which case it is in.
-    out['tau_true'] = tau_i
-    if rho > 0:
-        out['U'] = U
+    # Observed rows and answers are separate frames with identical row order.
+    # This also allows uploaded covariates named U, y0, y1 or tau_true safely.
+    oracle = pd.DataFrame({'y0': y0, 'y1': y1,
+                           'tau_true': np.asarray(tau_i) * np.ones(n), 'U': U})
+    if mechanism == 'designed':
+        oracle['assignment_probability'] = ps
+        overlap = overlap_diagnostics(ps, Z)
+        overlap['kind'] = 'P(Z=1|X,U)' if rho > 0 else 'P(Z=1|X)'
+    else:
+        # The initial arm draw P(Z|U) is not the propensity given observed X.
+        overlap = {'kind': 'unavailable', 'ps_min': np.nan, 'ps_max': np.nan,
+                   'pct_extreme': np.nan, 'treated_frac': float(Z.mean())}
 
     return {
         'data': out,
+        'oracle': oracle,
         'fx': fx,
         'U': U,
         'Z': Z,
-        'propensity': ps,
+        'propensity': ps if mechanism == 'designed' else None,
         'tau_true': np.asarray(tau_i) * np.ones(n),
         'decoded': decoded,
         'X_encoded': X_final,
-        'overlap': overlap_diagnostics(ps, Z),
+        'overlap': overlap,
         # The ATE is now the AVERAGE of the individual effects. With a constant tau
         # that is tau exactly; with tau(X) it is a computed quantity, and it is the
         # number an ATE estimator should be scored against.

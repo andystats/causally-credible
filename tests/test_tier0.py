@@ -45,7 +45,7 @@ def fit_pipeline(df, outcome_col='outcome', treatment_col='treatment',
     X_train, Z_train, feature_names = encode_data(
         df_train, outcome_col=outcome_col, treatment_col=treatment_col)
     X_hold, Z_hold, _ = encode_data(
-        df_hold, outcome_col=outcome_col, treatment_col=treatment_col)
+        df_hold, outcome_col=outcome_col, treatment_col=treatment_col, schema=feature_names.schema)
 
     set_seed(train_seed)
     model = ConditionalVAE(input_dim=X_train.shape[1], latent_dim=16)
@@ -251,7 +251,7 @@ def test_categorical_round_trip_preserves_rare_levels():
     assert 'region_rare' in names, "one-hot encoding should expand region"
 
     # Decoder scores that imply P = (0.45, 0.40, 0.15) for every row.
-    scores = np.tile(np.array([np.log(0.45), np.log(0.40), np.log(0.15)]), (n, 1))
+    scores = np.tile(np.array([0.45, 0.40, 0.15]), (n, 1))
     X_fake = np.zeros((n, len(names)))
     for k, level in enumerate(['north', 'south', 'rare']):
         X_fake[:, names.index('region_' + level)] = scores[:, k]
@@ -378,7 +378,7 @@ def test_truth_gate_gcomputation_recovers_tau():
     # The exported data must actually determine the outcome. If align_encoding()
     # were skipped, the covariates would only loosely track what drove f(X) and
     # this residual check would blow up.
-    resid_sd = np.std(data['y0'].values - out['fx'])
+    resid_sd = np.std(out['oracle']['y0'].values - out['fx'])
     assert resid_sd < 1.5 * pipe['sd_y'], \
         "y0 is not explained by the exported covariates plus noise"
 
@@ -398,8 +398,8 @@ def test_unmeasured_confounding_breaks_adjustment():
     covariates = [c for c in df.columns if c not in ('outcome', 'treatment')]
 
     adjusted = g_computation(data, 'outcome', 'treatment', covariates)
-    assert 'U' in data.columns, "U should be exported when rho > 0"
-    with_u = g_computation(data, 'outcome', 'treatment', covariates + ['U'])
+    assert 'U' not in data.columns, "Oracle U must not leak into observed data"
+    with_u = g_computation(data.assign(U=out['oracle']['U']), 'outcome', 'treatment', covariates + ['U'])
 
     print("    rho=0.8: adjusted-for-X {:.3f} (bias {:+.3f}) | "
           "adjusted-for-X-and-U {:.3f} (bias {:+.3f})".format(

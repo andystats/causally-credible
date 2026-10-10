@@ -71,8 +71,9 @@ def run_scenario_grid(model, index, original_df, feature_names, sd_y, p_treat,
     pre-formatted, so the same table can be rendered in the app, exported to CSV, or
     read straight into R.
 
-    Every cell is seeded from the same base `seed` plus its position in the grid, so
-    the whole table is reproducible and any single cell can be re-run in isolation.
+    Cells share covariate and outcome-noise draws. Treatment assignment changes
+    with its declared mechanism, using a separate random stream. This is one
+    paired simulation, not a Monte Carlo estimate of estimator bias.
     """
     overlap_levels = overlap_levels or DEFAULT_OVERLAP
     heterogeneity_levels = heterogeneity_levels or DEFAULT_HETEROGENEITY
@@ -95,9 +96,8 @@ def run_scenario_grid(model, index, original_df, feature_names, sd_y, p_treat,
                     feature_names=feature_names, n=n, tau=tau0, rho=rho,
                     sd_y=sd_y, p_treat=p_treat, outcome_col=outcome_col,
                     treatment_col=treatment_col,
-                    # Distinct seed per cell, derived from the base seed so the whole
-                    # grid moves together when the user changes it.
-                    seed=seed + 1000 * cell,
+                    # Common random numbers isolate the changed mechanism.
+                    seed=seed,
                     mechanism='designed', overlap_strength=lam, effect=effect)
 
                 data = result['data']
@@ -125,9 +125,9 @@ def run_scenario_grid(model, index, original_df, feature_names, sd_y, p_treat,
                     'rho': rho,
                     'true_ate': true_ate,
                     'naive': naive,
-                    'naive_bias': naive - true_ate,
+                    'naive_error': naive - true_ate,
                     'gcomp': gcomp,
-                    'gcomp_bias': gcomp - true_ate,
+                    'gcomp_error': gcomp - true_ate,
                     'pct_extreme': result['overlap']['pct_extreme'],
                     'ps_min': result['overlap']['ps_min'],
                     'ps_max': result['overlap']['ps_max'],
@@ -148,38 +148,38 @@ def summarize_grid(grid):
     text can never contradict the numbers it sits beside -- the same discipline the
     survcausal-pilot vignette uses for its own prose.
     """
-    lines = []
+    lines = ["One paired cohort per cell: these are estimation errors, not Monte Carlo bias estimates."]
 
     clean = grid[(grid['rho'] == 0)]
     if len(clean):
-        worst = clean.loc[clean['gcomp_bias'].abs().idxmax()]
-        best = clean.loc[clean['gcomp_bias'].abs().idxmin()]
+        worst = clean.loc[clean['gcomp_error'].abs().idxmax()]
+        best = clean.loc[clean['gcomp_error'].abs().idxmin()]
         lines.append(
-            "With no hidden bias, adjustment works best under {} overlap "
-            "(bias {:+.3f}) and worst under {} overlap (bias {:+.3f}).".format(
-                best['overlap'], best['gcomp_bias'],
-                worst['overlap'], worst['gcomp_bias']))
+            "With no hidden bias, adjustment has the smallest error in this run under {} overlap "
+            "(error {:+.3f}) and the largest error under {} overlap (error {:+.3f}).".format(
+                best['overlap'], best['gcomp_error'],
+                worst['overlap'], worst['gcomp_error']))
 
     rand = grid[(grid['lambda'] == 0) & (grid['rho'] == 0)]
     if len(rand):
         lines.append(
-            "Randomised cells: naive bias averages {:+.3f} -- with no confounding, "
+            "Randomised cells: naive error averages {:+.3f} -- with no confounding, "
             "the unadjusted comparison is already unbiased.".format(
-                rand['naive_bias'].mean()))
+                rand['naive_error'].mean()))
 
     confounded = grid[(grid['lambda'] > 0) & (grid['rho'] == 0)]
     if len(confounded):
         lines.append(
-            "Confounded cells: naive bias averages {:+.3f} against g-computation's "
-            "{:+.3f}.".format(confounded['naive_bias'].mean(),
-                              confounded['gcomp_bias'].mean()))
+            "Confounded cells: naive error averages {:+.3f} against g-computation's "
+            "{:+.3f}.".format(confounded['naive_error'].mean(),
+                              confounded['gcomp_error'].mean()))
 
     hidden = grid[grid['rho'] > 0]
     if len(hidden):
         lines.append(
             "With an unmeasured confounder, adjusting for the observed covariates "
-            "leaves an average bias of {:+.3f} -- adjustment cannot fix what it "
-            "cannot see.".format(hidden['gcomp_bias'].mean()))
+            "leaves an average error of {:+.3f} -- adjustment cannot fix what it "
+            "cannot see.".format(hidden['gcomp_error'].mean()))
 
     extreme = grid.loc[grid['pct_extreme'].idxmax()]
     lines.append(

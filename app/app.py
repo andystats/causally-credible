@@ -22,11 +22,9 @@ from pathlib import Path
 #   dgp.py         chooses tau, rho and f(X)             (truth)
 #   realism.py     measures whether the realism is real  (evidence)
 # tests/test_tier0.py runs all three headlessly.
-from cvae_model import ConditionalVAE, encode_data, set_seed
-from dgp import PrognosticIndex, EffectFunction, generate_cohort
 from examples import load_example
-from realism import realism_report
-from scenarios import run_scenario_grid, summarize_grid
+from scenarios import summarize_grid
+from workflow import ExperimentSession, treatment_levels, analysis_summary, answer_bundle
 
 # Set style
 sns.set_style("whitegrid")
@@ -272,7 +270,7 @@ app_ui = ui.page_fluid(
         ui.tags.div({"class": "app-title"}, "Module 5: Credence Framework Tutorial"),
         ui.tags.p(
             {"class": "app-subtitle"},
-            "Generate realistic synthetic data with known ground truth to validate causal inference methods"
+            "Generate semi-synthetic data with known truth and measure its realism"
         ),
     ),
 
@@ -303,7 +301,7 @@ app_ui = ui.page_fluid(
             ),
             ui.tags.li(
                 ui.strong("Ground truth:"),
-                ui.HTML(" you set the Average Treatment Effect (ATE) \\((\\tau)\\); Credence also supports heterogeneous effects \\((\\tau(X))\\) and bias functions.")
+                ui.HTML(" you set a baseline effect and optional heterogeneity. The actual cohort ATE is computed from the generated individual effects.")
             ),
         ),
 
@@ -311,8 +309,8 @@ app_ui = ui.page_fluid(
         ui.tags.div(
             {"class": "module-ref"},
             ui.HTML("<strong>From Module 4:</strong> We used <code>simcausal</code> to generate data with parametric assumptions. "
-                    "Here, we use a CVAE to learn the <em>actual</em> covariate structure from real data, "
-                    "making our synthetic benchmarks more realistic for validating TMLE and other methods.")
+                    "Here, we use a CVAE to approximate the covariate structure of real data, "
+                    "then check held-out fidelity before using the synthetic benchmarks to evaluate TMLE and other methods.")
         ),
 
         # Math Notes Details
@@ -329,8 +327,8 @@ app_ui = ui.page_fluid(
                 ui.p(ui.HTML("The VAE is trained by optimizing the ELBO (Evidence Lower Bound) loss function. This objective balances two critical goals: ensuring the decoded data is a faithful <strong>reconstruction</strong> of the original, while also <strong>regularizing</strong> the latent space to be smooth and well-behaved, which is crucial for generating new data.")),
                 ui.p("To create a simulation with a known 'ground truth' answer, we can then define the rules for this synthetic world:"),
                 ui.tags.ul(
-                    ui.tags.li(ui.HTML("<strong>Unobserved Confounding:</strong> We can specify how an unobserved variable \\(U\\) influences treatment selection, for instance: \\(\\Pr(Z=1 \\mid U) = \\text{logistic}(\\alpha + \\rho U)\\).")),
-                    ui.tags.li(ui.HTML("<strong>Potential Outcomes:</strong> This same confounder can also affect the outcomes. We can define potential outcomes as \\(Y(0) = f(X) + \\gamma U + \\varepsilon\\) and \\(Y(1)=Y(0)+\\tau\\). By design, the true Average Treatment Effect (ATE) we want the causal methods to find is simply \\(\\E[Y(1){-}Y(0)] = \\tau\\)."))
+                    ui.tags.li(ui.HTML("<strong>Designed treatment assignment:</strong> \\(\\Pr(Z=1 \\mid X,U) = \\operatorname{logistic}(\\alpha + \\lambda m(X) + \\rho U)\\). The learned mechanism instead draws treatment before covariates.")),
+                    ui.tags.li(ui.HTML("<strong>Potential outcomes:</strong> \\(Y(0)=f(X)+\\gamma\\rho\\sigma_Y U+\\varepsilon\\), \\(Y(1)=Y(0)+\\tau(X)\\), and \\(\\tau(X)=\\tau_0+\\kappa\\sigma_Y m(X)\\). The reported cohort ATE is the average of these individual effects; it equals the baseline effect when heterogeneity is zero."))
                 )
             )
         ),
@@ -356,7 +354,7 @@ app_ui = ui.page_fluid(
             ui.tags.ul(
                 ui.tags.li(ui.HTML("\\(X\\): covariates; \\(Z\\): binary treatment; \\(Y\\): outcome; \\(Y(0), Y(1)\\): potential outcomes.")),
                 ui.tags.li(ui.HTML("\\(U\\): unobserved confounder; \\(f(X)\\): baseline outcome function.")),
-                ui.tags.li(ui.HTML("\\(\\tau\\): Average Treatment Effect (ATE); \\(\\alpha\\): treatment-logit intercept; \\(\\rho\\): strength of unobserved confounding.")),
+                ui.tags.li(ui.HTML("\\(\\tau_0\\): baseline effect; \\(\\tau(X)\\): individual effect; \\(\\kappa\\): heterogeneity; \\(\\alpha\\): treatment-logit intercept; \\(\\rho\\): hidden-confounding strength.")),
                 ui.tags.li(ui.HTML("Encoder \\((q_\\phi(u \\mid x,z))\\), Decoder \\((p_\\theta(x \\mid u,z))\\); ELBO \\((\\mathscr{L}(\\theta,\\phi))\\)."))
             )
         ),
@@ -385,8 +383,7 @@ app_ui = ui.page_fluid(
                 ui.tags.code("Y"), " is treated as numeric; factors are supported in ", ui.tags.code("X"), "."
             ),
             ui.p(
-                ui.strong("Note:"), " The Credence framework supports effect heterogeneity and bias functions of covariates. This app uses a constant ",
-                ui.tags.code("τ"), " and a simple ", ui.tags.code("f(X)"), " for clarity."
+                ui.strong("Note:"), " The baseline effect is constant when heterogeneity is zero. Otherwise the effect varies with covariates, and the actual cohort ATE is reported after generation."
             )
         ),
 
@@ -404,6 +401,7 @@ app_ui = ui.page_fluid(
         ),
         ui.output_ui("example_note"),
         ui.output_ui("csv_controls"),
+        ui.output_ui("treatment_controls"),
         ui.input_action_button("process_data", "Confirm Data", class_="btn-primary"),
         ui.output_text_verbatim("data_summary")
     ),
@@ -462,17 +460,14 @@ app_ui = ui.page_fluid(
     ui.tags.div(
         {"class": "step-panel", "id": "step3"},
         ui.h3("Step 3: Generate Biased Synthetic Data"),
-        ui.p("Create new data using the learned structure. You set the ground-truth effect (ATE) and inject unmeasured confounding via a latent ", ui.tags.code("U"), "."),
+        ui.p("Create new data using the learned structure. You set the baseline effect and inject unmeasured confounding via a latent ", ui.tags.code("U"), "."),
 
         ui.tags.details(
             ui.tags.summary("Data-generating process"),
-            ui.tags.div(
-                {"class": "math-note"},
-                ui.p(ui.HTML("Assignment: \\((\\Pr(Z{=}1 \\mid U) = \\text{logistic}(\\alpha + \\rho U))\\). Larger \\((\\rho)\\) means stronger unobserved confounding.")),
-                ui.p(ui.HTML("Outcomes: \\((Y(0) = f(X) + \\gamma U + \\varepsilon,\\; Y(1)=Y(0)+\\tau)\\). The ATE is \\((\\tau)\\).")),
-                ui.p(ui.HTML("\\(f(X)\\) summarizes observed confounding learned from the data; \\(U\\) violates exchangeability in a controlled way.")),
-                ui.p(ui.HTML("This app uses a constant \\(\\tau\\); the Credence framework supports heterogeneity \\(\\tau(X)\\) and bias functions of \\(X\\)."))
-            )
+            ui.p("The learned mechanism draws treatment first, then covariates conditional on treatment. "
+                 "The designed mechanism draws covariates first, then assigns treatment using the overlap and hidden-confounding controls."),
+            ui.p("Untreated outcomes combine the standardized prognostic index, gamma × rho × U × training-outcome SD, "
+                 "and noise. Treated outcomes add the per-person effect. The reported true ATE is the mean of those effects."),
         ),
 
         ui.tags.details(
@@ -482,7 +477,7 @@ app_ui = ui.page_fluid(
                 ui.p(ui.HTML(
                     "\\(f(X)\\) is the <strong>prognostic index</strong>: how the observed "
                     "covariates move the untreated outcome \\(Y(0)\\). It is the entire "
-                    "observed-confounding mechanism, so it should be a stated modelling "
+                    "outcome component of observed confounding, so it should be a stated modelling "
                     "choice rather than an accident.")),
                 ui.p(ui.HTML(
                     "It previously was an accident. \\(f(X)\\) was an unweighted mean of the "
@@ -494,42 +489,26 @@ app_ui = ui.page_fluid(
                 ui.p(ui.HTML(
                     "Now every covariate is standardised first, then combined with "
                     "<strong>weights shown in the table below</strong>. Equal weights is the "
-                    "default and means what it says. Turning the weights into a control, and "
-                    "letting the effect \\(\\tau\\) vary with \\(X\\), is the next step for "
-                    "this app."))
+                    "default. The weights remain fixed; "
+                    "effect variation is controlled separately below."))
             )
         ),
 
         ui.row(
-            ui.column(3, ui.input_numeric("tau", "True ATE (τ)", value=-5, min=-100, max=100, step=0.5)),
+            ui.column(3, ui.input_numeric("tau", "Baseline effect (τ₀)", value=-5, min=-100, max=100, step=0.5)),
             ui.column(3, ui.input_numeric("rho", "Unmeasured Confounding (ρ)", value=0.0, min=0.0, max=1.0, step=0.1)),
             ui.column(3, ui.input_numeric("n_sim", "Sample Size", value=1500, min=100, max=10000, step=100)),
             ui.column(3, ui.input_numeric("gen_seed", "Generation Seed", value=7, min=0, step=1))
         ),
 
         ui.tags.details(
-            ui.tags.summary("Effect heterogeneity, and why constant τ was holding the app back"),
-            ui.tags.div(
-                {"class": "math-note"},
-                ui.p(ui.HTML(
-                    "With a <strong>constant</strong> \\(\\tau\\), every patient benefits "
-                    "identically &mdash; and g-computation, IPW, AIPW and TMLE all recover the "
-                    "same number. Comparing them teaches only that they agree. The problem is "
-                    "not hard enough to tell them apart.")),
-                ui.p(ui.HTML(
-                    "It also makes the clinically important question unaskable. "
-                    "<em>Does this work?</em> and <em>does this work <strong>for this "
-                    "patient</strong>?</em> are different questions, and only the second needs "
-                    "\\(\\tau\\) to vary.")),
-                ui.p(ui.HTML(
-                    "$$\\tau(X) = \\tau_0 + \\kappa \\cdot \\sigma_Y \\cdot m(X)$$")),
-                ui.p(ui.HTML(
-                    "\\(m(X)\\) is centred, so \\(\\mathbb{E}[\\tau(X)] = \\tau_0\\): "
-                    "<strong>turning heterogeneity on does not move the average effect.</strong> "
-                    "The number you typed above stays the ATE; only the spread around it "
-                    "changes. That is deliberate &mdash; otherwise you could not tell a broken "
-                    "estimator from a moving target."))
-            )
+            ui.tags.summary("Effect heterogeneity and the actual average effect"),
+            ui.p("With zero heterogeneity, everyone has the same effect. Estimators can still differ in finite-sample "
+                 "error or robustness; heterogeneous effects additionally let us study patient-level benefit."),
+            ui.p("The effect is τ(X) = τ₀ + κ × training-outcome SD × m(X). "
+                 "The modifier m(X) is centered on the training data, not recentered on each new cohort."),
+            ui.p("τ₀ is the baseline effect at m(X)=0. The generated population can have a different modifier mean, "
+                 "so its actual average effect may differ from τ₀. Both are reported explicitly."),
         ),
 
         ui.tags.details(
@@ -543,7 +522,7 @@ app_ui = ui.page_fluid(
                 ui.p(ui.HTML(
                     "<strong>Designed</strong> mechanism: draw \\(X\\) first, then "
                     "$$\\Pr(Z=1 \\mid X, U) = \\text{logistic}(\\alpha + \\lambda\\, m(X) + \\rho U).$$ "
-                    "Now \\(\\lambda\\) is a dial: 0 is a randomised trial on realistic "
+                    "With no hidden confounding, \\(\\lambda\\)=0 is a randomised trial on realistic "
                     "covariates, 1 is real confounding with comfortable overlap, 3 piles "
                     "propensities up at 0 and 1.")),
                 ui.p(ui.HTML(
@@ -568,7 +547,7 @@ app_ui = ui.page_fluid(
         ),
         ui.tags.p(
             {"class": "text-muted", "style": "font-size: 0.9em; margin-top: -10px;"},
-            ui.HTML("ATE typical range: -10 to 10. ρ ranges: 0.0 (none) to 0.6+ (strong). <br><strong>Note:</strong> When ρ=0, the unobserved confounder U has zero influence and is excluded from the downloaded dataset.")
+            ui.HTML("Baseline effect typical range: -10 to 10. ρ ranges: 0.0 (none) to 0.6+ (strong). <br><strong>Note:</strong> The generated hidden confounder and counterfactual outcomes are in the separate answer key, not the observed-data download.")
         ),
         ui.tags.p(
             {"class": "text-muted", "style": "font-size: 0.9em;"},
@@ -592,7 +571,7 @@ app_ui = ui.page_fluid(
             ui.tags.summary("Why naive is biased"),
             ui.tags.div(
                 {"class": "math-note"},
-                ui.p(ui.HTML("Naive difference equals \\((\\tau + [\\mathbb{E}(Y(0) \\mid Z{=}1) - \\mathbb{E}(Y(0) \\mid Z{=}0)])\\). If either observed confounding (via \\((X)\\)) or unobserved \\((U)\\) shifts \\((Y(0))\\) across groups, bias appears."))
+                ui.p("The observed treated-minus-control contrast can differ from the cohort-average effect because the treatment groups have different baseline outcomes and, with heterogeneity, different effects. One run shows estimation error; repeated runs are needed to measure bias."),
             )
         ),
 
@@ -682,7 +661,9 @@ app_ui = ui.page_fluid(
             ui.HTML("<strong>Workshop Materials:</strong> This app is part of the instats SSC 2026 Accreditation Workshop on Modern Analysis of Real-World Data Following the Causal Roadmap & Applications of Causal AI.")
         ),
 
-        ui.download_button("download_data", "Download Synthetic Dataset (.csv)", class_="btn-success"),
+        ui.p("The CSV contains observed data only. The separate answer bundle includes ground truth; "
+             "keep its answer-key columns out of learner features. Rows align by CSV row order."),
+        ui.output_ui("download_controls"),
     ),
 
     # Step 5: Factorial scenario grid
@@ -719,7 +700,7 @@ app_ui = ui.page_fluid(
                     "diagnostic the R pilot already computes and never varies &mdash; across "
                     "all four of its design cells it reads 0.00000, 0.00000, 0.00036, 0.00047. "
                     "A diagnostic that never moves teaches nothing. Here it moves, and you can "
-                    "watch estimator bias move with it."))
+                    "inspect estimation error. Repeated runs are needed to measure bias."))
             )
         ),
 
@@ -732,7 +713,7 @@ app_ui = ui.page_fluid(
         ),
         ui.output_text_verbatim("grid_status"),
         ui.output_ui("grid_results"),
-        ui.download_button("download_grid", "Download Grid (.csv)", class_="btn-success"),
+        ui.output_ui("grid_download_controls"),
     ),
 )
 
@@ -742,15 +723,34 @@ def server(input, output, session):
     # Reactive values
     data_loaded = reactive.Value(None)
     data_note = reactive.Value("")
-    data_processed = reactive.Value(None)
-    # Everything produced by Step 2 travels together in one dict: the model, the
-    # prognostic index fitted on the same rows, and the holdout the model never saw.
-    # Keeping them in a single value makes it impossible to pair a model with the
-    # wrong holdout, which is the sort of mistake that silently flatters a metric.
-    train_state = reactive.Value(None)
-    sim_data = reactive.Value(None)      # the exported frame (download / plots read this)
-    sim_extras = reactive.Value(None)    # fx, U, encoded covariates, realism report
-    grid_data = reactive.Value(None)      # the factorial scenario table
+    experiment = reactive.Value(ExperimentSession())
+
+    def report_error(exc):
+        ui.notification_show(str(exc), type="error", duration=12)
+
+    @reactive.Effect
+    @reactive.event(input.outcome_col, input.treatment_col, input.treated_level)
+    def invalidate_roles():
+        experiment.set(ExperimentSession())
+
+    @reactive.Effect
+    @reactive.event(input.train_seed, input.holdout_frac, input.epochs, input.batch_size)
+    def invalidate_training():
+        old = experiment.get()
+        experiment.set(ExperimentSession(confirmed=old.confirmed))
+
+    @reactive.Effect
+    @reactive.event(input.tau, input.rho, input.n_sim, input.gen_seed,
+                    input.heterogeneity, input.mechanism, input.overlap_strength)
+    def invalidate_generation():
+        old = experiment.get()
+        experiment.set(ExperimentSession(confirmed=old.confirmed, trained=old.trained))
+
+    @reactive.Effect
+    @reactive.event(input.grid_n, input.grid_seed)
+    def invalidate_grid():
+        old = experiment.get()
+        experiment.set(ExperimentSession(confirmed=old.confirmed, trained=old.trained, run=old.run))
 
     # Load example data. The datasets themselves live in examples.py so the test
     # suite exercises exactly what the workshop runs.
@@ -760,11 +760,13 @@ def server(input, output, session):
         name = input.example_dataset()
         if not name:
             return
+        experiment.set(ExperimentSession())
         try:
             df, note = load_example(name)
             data_loaded.set(df)
             data_note.set(note)
         except Exception as e:
+            data_loaded.set(None)
             data_note.set("Could not load example: {}".format(e))
 
     @output
@@ -792,8 +794,16 @@ def server(input, output, session):
     def _():
         file_info = input.csv_file()
         if file_info is not None:
-            df = pd.read_csv(file_info[0]["datapath"])
-            data_loaded.set(df)
+            experiment.set(ExperimentSession())
+            data_note.set("")
+            try:
+                df = pd.read_csv(file_info[0]["datapath"])
+                if len(df.columns) < 3:
+                    raise ValueError("Include outcome, treatment and at least one covariate.")
+                data_loaded.set(df)
+            except Exception as exc:
+                data_loaded.set(None)
+                report_error(exc)
 
     # Show column selectors
     @output
@@ -814,94 +824,64 @@ def server(input, output, session):
                           choices=list(df.columns), selected=treatment_default)
         )
 
-    # Process data
+    @output
+    @render.ui
+    def treatment_controls():
+        df = data_loaded.get()
+        if df is None or input.treatment_col() not in df:
+            return None
+        levels = treatment_levels(df[input.treatment_col()])
+        if set(levels) == {0, 1}:
+            choices, selected = {"1": "1 (treated); 0 (control)"}, "1"
+        else:
+            choices = {"": "Choose the treated level", **{str(i): str(v) for i, v in enumerate(levels)}}
+            selected = ""
+        return ui.input_select("treated_level", "Treatment meaning", choices=choices, selected=selected)
+
     @reactive.Effect
     @reactive.event(input.process_data)
-    def _():
+    def confirm_data():
+        experiment.set(ExperimentSession())
         df = data_loaded.get()
         if df is None:
+            report_error(ValueError("Load a dataset first."))
             return
+        try:
+            levels = treatment_levels(df[input.treatment_col()])
+            selection = input.treated_level()
+            treated = 1 if set(levels) == {0, 1} else (levels[int(selection)] if selection else None)
+            experiment.set(ExperimentSession().confirm(df, input.outcome_col(), input.treatment_col(), treated))
+        except Exception as exc:
+            report_error(exc)
 
-        # Check treatment is binary
-        if df[input.treatment_col()].nunique() != 2:
-            return
-
-        # Create processed dataset
-        processed = df.copy()
-        processed = processed.dropna()
-
-        # Ensure treatment is 0/1
-        z_vals = processed[input.treatment_col()].unique()
-        z_map = {z_vals[0]: 0, z_vals[1]: 1}
-        processed[input.treatment_col()] = processed[input.treatment_col()].map(z_map)
-
-        data_processed.set(processed)
-
-    # Show data summary
     @output
     @render.text
     def data_summary():
-        df = data_processed.get()
-        if df is None:
+        confirmed = experiment.get().confirmed
+        if confirmed is None:
             return ""
+        return (f"Data confirmed: {len(confirmed['data'])} complete observations "
+                f"({confirmed['dropped_rows']} rows removed).\n"
+                f"Treatment: {confirmed['treatment_col']} — 0 = {confirmed['treatment_mapping']['0']}, "
+                f"1 = {confirmed['treatment_mapping']['1']}\nOutcome: {confirmed['outcome_col']}")
 
-        return f"Data confirmed: {len(df)} complete observations.\nTreatment: {input.treatment_col()}\nOutcome: {input.outcome_col()}"
-
-    # Train CVAE
     @reactive.Effect
     @reactive.event(input.learn_model)
-    def _():
-        df = data_processed.get()
-        if df is None:
-            return
-
-        outcome_col = input.outcome_col()
-        treatment_col = input.treatment_col()
-        seed = int(input.train_seed())
-
-        # Split BEFORE training. The holdout is the only honest yardstick for the
-        # realism check in Step 4: measured against its own training rows, a
-        # flexible generator can score well by memorising them.
-        split_rng = np.random.default_rng(seed)
-        order = split_rng.permutation(len(df))
-        n_hold = max(20, int(round(float(input.holdout_frac()) * len(df))))
-        n_hold = min(n_hold, len(df) - 20) if len(df) > 40 else max(1, len(df) // 4)
-
-        df_hold = df.iloc[order[:n_hold]].reset_index(drop=True)
-        df_train = df.iloc[order[n_hold:]].reset_index(drop=True)
-
-        X_train, Z_train, feature_names = encode_data(
-            df_train, outcome_col=outcome_col, treatment_col=treatment_col)
-        X_hold, _, _ = encode_data(
-            df_hold, outcome_col=outcome_col, treatment_col=treatment_col)
-
-        batch_size = int(input.batch_size())
-        batch_size = None if batch_size <= 0 else batch_size
-
-        # Seed before construction: torch draws the initial weights from its global
-        # generator at __init__ time, so seeding inside fit() would already be late.
-        set_seed(seed)
-        model = ConditionalVAE(input_dim=X_train.shape[1], latent_dim=16)
-        model.fit(X_train, Z_train, epochs=int(input.epochs()), lr=1e-3,
-                  batch_size=batch_size, seed=seed, verbose=True)
-
-        # f(X) is fitted on the same training rows, so the standardisation constants
-        # it uses come from data the model was allowed to see.
-        index = PrognosticIndex().fit(X_train, feature_names)
-
-        train_state.set({
-            'model': model, 'index': index, 'feature_names': feature_names,
-            'X_train': X_train, 'X_hold': X_hold,
-            'df_train': df_train, 'df_hold': df_hold,
-            'n_train': len(df_train), 'n_hold': len(df_hold),
-            'batch_size': batch_size, 'seed': seed,
-        })
+    def train_model():
+        old = experiment.get()
+        experiment.set(ExperimentSession(confirmed=old.confirmed))
+        try:
+            experiment.set(experiment.get().train(seed=int(input.train_seed()),
+                holdout_frac=float(input.holdout_frac()), epochs=int(input.epochs()),
+                batch_size=int(input.batch_size()) or None))
+        except Exception as exc:
+            report_error(exc)
 
     # Training output
     @output
     @render.text
     def training_output():
-        state = train_state.get()
+        state = experiment.get().trained
         if state is None:
             return ""
 
@@ -925,7 +905,7 @@ def server(input, output, session):
     @output
     @render.plot
     def elbo_plot():
-        state = train_state.get()
+        state = experiment.get().trained
         if state is None:
             return None
 
@@ -952,59 +932,24 @@ def server(input, output, session):
         fig.tight_layout()
         return fig
 
-    # Generate synthetic data. The whole data-generating process lives in dgp.py --
-    # see generate_cohort() there for the step-by-step, which is worth reading
-    # aloud in the workshop because it is the part that defines "truth".
     @reactive.Effect
     @reactive.event(input.generate_data)
-    def _():
-        state = train_state.get()
-        df = data_processed.get()
-        if state is None or df is None:
-            return
-
-        outcome_col = input.outcome_col()
-        treatment_col = input.treatment_col()
-        n = int(input.n_sim())
-        seed = int(input.gen_seed())
-
-        effect = EffectFunction(tau0=float(input.tau()),
-                                heterogeneity=float(input.heterogeneity()))
-        mechanism = input.mechanism()
-        overlap_strength = float(input.overlap_strength())
-
-        result = generate_cohort(
-            model=state['model'], index=state['index'], original_df=df,
-            feature_names=state['feature_names'], n=n,
-            tau=float(input.tau()), rho=float(input.rho()),
-            sd_y=float(df[outcome_col].std()),
-            p_treat=float(df[treatment_col].mean()),
-            outcome_col=outcome_col, treatment_col=treatment_col, seed=seed,
-            mechanism=mechanism, overlap_strength=overlap_strength, effect=effect)
-
-        # Realism is measured on a synthetic batch the same size as the holdout, and
-        # drawn at the holdout's own treatment assignments, so the comparison is not
-        # confounded by a different treated/control mix.
-        holdout_check = generate_cohort(
-            model=state['model'], index=state['index'], original_df=df,
-            feature_names=state['feature_names'], n=len(state['X_hold']),
-            tau=float(input.tau()), rho=float(input.rho()),
-            sd_y=float(df[outcome_col].std()),
-            p_treat=float(df[treatment_col].mean()),
-            outcome_col=outcome_col, treatment_col=treatment_col, seed=seed + 1)
-
-        report = realism_report(state['X_hold'], holdout_check['X_encoded'],
-                                state['feature_names'], seed=seed)
-
-        sim_data.set(result['data'])
-        sim_extras.set({'result': result, 'realism': report})
+    def generate_data():
+        old = experiment.get()
+        experiment.set(ExperimentSession(confirmed=old.confirmed, trained=old.trained, grid=old.grid))
+        try:
+            experiment.set(experiment.get().generate(n=int(input.n_sim()), tau0=float(input.tau()),
+                rho=float(input.rho()), seed=int(input.gen_seed()), heterogeneity=float(input.heterogeneity()),
+                mechanism=input.mechanism(), overlap_strength=float(input.overlap_strength())))
+        except Exception as exc:
+            report_error(exc)
 
     # Generation output
     @output
     @render.text
     def generation_output():
-        df = sim_data.get()
-        extras = sim_extras.get()
+        df = (experiment.get().run['result']['data'] if experiment.get().run is not None else None)
+        extras = experiment.get().run
         if df is None or extras is None:
             return ""
         result = extras['result']
@@ -1016,23 +961,24 @@ def server(input, output, session):
                            result['true_ate'], tau_sd,
                            float(np.min(result['tau_true'])),
                            float(np.max(result['tau_true']))))
+        if ov['kind'] == 'unavailable':
+            overlap_line = "  observed-covariate overlap: not available for the learned mechanism"
+        else:
+            overlap_line = (f"  assignment probability {ov['kind']}: [{ov['ps_min']:.3f}, {ov['ps_max']:.3f}]\n"
+                            f"  extreme assignment probabilities (<0.05 or >0.95): {ov['pct_extreme']:.1%}")
         return (
-            "Synthetic data generated: {} observations, {} columns.\n"
-            "  true ATE: {:.3f}   |   all {} covariates exported in original schema\n"
-            "{}\n"
-            "  propensity: [{:.3f}, {:.3f}]   treated fraction {:.3f}\n"
-            "  positivity: {:.1%} of patients at extreme propensity (<0.05 or >0.95)"
-        ).format(len(df), df.shape[1], result['true_ate'],
-                 result['decoded'].shape[1], effect_line,
-                 ov['ps_min'], ov['ps_max'], ov['treated_frac'], ov['pct_extreme'])
+            f"Synthetic data generated: {len(df)} observations, {df.shape[1]} observed columns.\n"
+            f"  actual cohort ATE: {result['true_ate']:.3f} | baseline effect: {extras['parameters']['tau']:.3f}\n"
+            f"  all {result['decoded'].shape[1]} covariates exported; answer key is separate\n"
+            f"{effect_line}\n{overlap_line}\n  treated fraction: {ov['treated_frac']:.3f}")
 
     # The f(X) weights, shown rather than hidden. This is the observed-confounding
     # mechanism in full: if a covariate has weight 0 it cannot confound anything.
     @output
     @render.ui
     def fx_weights():
-        state = train_state.get()
-        if state is None or sim_data.get() is None:
+        state = experiment.get().trained
+        if state is None or (experiment.get().run['result']['data'] if experiment.get().run is not None else None) is None:
             return None
 
         table = state['index'].weights_table()
@@ -1056,8 +1002,8 @@ def server(input, output, session):
     @output
     @render.ui
     def realism_results():
-        extras = sim_extras.get()
-        state = train_state.get()
+        extras = experiment.get().run
+        state = experiment.get().trained
         if extras is None or state is None:
             return None
 
@@ -1066,7 +1012,8 @@ def server(input, output, session):
         covariates = report['covariates'].copy()
 
         auc = disc['auc']
-        colour = "#1c8b4a" if auc < 0.60 else ("#fd7e14" if auc < 0.80 else "#dc3545")
+        discrimination = max(auc, 1 - auc)
+        colour = "#1c8b4a" if discrimination < 0.60 else ("#fd7e14" if discrimination < 0.80 else "#dc3545")
         worst = covariates.iloc[0]
 
         display = covariates[['covariate', 'real_mean', 'synthetic_mean', 'smd', 'ks']].copy()
@@ -1081,7 +1028,7 @@ def server(input, output, session):
                     ui.tags.div({"class": "metric-label"}, "Discriminator AUC"),
                     ui.tags.div({"class": "metric-value", "style": "color: {};".format(colour)},
                                 "{:.3f}".format(auc)),
-                    ui.tags.div({"class": "metric-label"}, "0.5 = indistinguishable")
+                    ui.tags.div({"class": "metric-label"}, "0.5 = chance for this diagnostic")
                 )),
                 ui.column(4, ui.tags.div(
                     {"class": "metric-card"},
@@ -1114,16 +1061,12 @@ def server(input, output, session):
     @output
     @render.ui
     def analysis_results():
-        df = sim_data.get()
+        df = (experiment.get().run['result']['data'] if experiment.get().run is not None else None)
         if df is None:
             return None
 
-        true_ate = df['tau_true'].iloc[0]
-        y_col = input.outcome_col()
-        z_col = input.treatment_col()
-
-        naive_ate = df[df[z_col] == 1][y_col].mean() - df[df[z_col] == 0][y_col].mean()
-        bias = naive_ate - true_ate
+        summary = analysis_summary(experiment.get().run)
+        true_ate, naive_ate, bias = summary['true_ate'], summary['naive'], summary['error']
 
         return ui.TagList(
             ui.h4("Analysis Results"),
@@ -1140,7 +1083,7 @@ def server(input, output, session):
                 )),
                 ui.column(4, ui.tags.div(
                     {"class": "metric-card"},
-                    ui.tags.div({"class": "metric-label"}, "Bias"),
+                    ui.tags.div({"class": "metric-label"}, "Estimation error"),
                     ui.tags.div({"class": "metric-value", "style": "color: #dc3545;"}, f"{bias:.2f}")
                 ))
             )
@@ -1150,19 +1093,20 @@ def server(input, output, session):
     @output
     @render.plot
     def outcome_plot():
-        df = sim_data.get()
+        df = (experiment.get().run['result']['data'] if experiment.get().run is not None else None)
         if df is None:
             return None
 
-        y_col = input.outcome_col()
-        z_col = input.treatment_col()
+        y_col = experiment.get().run['outcome_col']
+        z_col = experiment.get().run['treatment_col']
 
         fig, ax = plt.subplots(figsize=(10, 5))
 
         # Plot density for each treatment group with instats colors
         for z_val, color, label in [(0, '#6c757d', 'Control'), (1, '#4A9EFF', 'Treated')]:
             df_sub = df[df[z_col] == z_val][y_col]
-            df_sub.plot.density(ax=ax, color=color, alpha=0.7, label=label, linewidth=2)
+            if len(df_sub) > 1 and df_sub.std() > 0:
+                df_sub.plot.density(ax=ax, color=color, alpha=0.7, label=label, linewidth=2)
 
         ax.set_xlabel('Outcome (Y)')
         ax.set_ylabel('Density')
@@ -1172,55 +1116,40 @@ def server(input, output, session):
 
         return fig
 
-    # ---- Step 5: the factorial scenario grid --------------------------------
     @reactive.Effect
     @reactive.event(input.run_grid)
-    def _():
-        state = train_state.get()
-        df = data_processed.get()
-        if state is None or df is None:
-            return
-
-        outcome_col = input.outcome_col()
-        treatment_col = input.treatment_col()
-        covariates = [c for c in df.columns if c not in (outcome_col, treatment_col)]
-
-        grid = run_scenario_grid(
-            model=state['model'], index=state['index'], original_df=df,
-            feature_names=state['feature_names'],
-            sd_y=float(df[outcome_col].std()),
-            p_treat=float(df[treatment_col].mean()),
-            outcome_col=outcome_col, treatment_col=treatment_col,
-            covariates=covariates, tau0=float(input.tau()),
-            n=int(input.grid_n()), seed=int(input.grid_seed()))
-
-        grid_data.set(grid)
+    def run_grid():
+        try:
+            experiment.set(experiment.get().run_grid(tau0=float(input.tau()),
+                                                     n=int(input.grid_n()), seed=int(input.grid_seed())))
+        except Exception as exc:
+            report_error(exc)
 
     @output
     @render.text
     def grid_status():
-        grid = grid_data.get()
+        grid = experiment.get().grid
         if grid is None:
             return ""
-        return "{} cells generated. Every cell holds the generator, covariates, τ₀ and n fixed.".format(
+        return "{} cells generated with common random draws for covariates and outcome noise. Estimates use one cohort per cell.".format(
             len(grid))
 
     @output
     @render.ui
     def grid_results():
-        grid = grid_data.get()
+        grid = experiment.get().grid
         if grid is None:
             return None
 
         display = grid[['overlap', 'heterogeneity', 'hidden_bias', 'true_ate',
-                        'naive_bias', 'gcomp_bias', 'pct_extreme', 'cate_corr']].copy()
+                        'naive_error', 'gcomp_error', 'pct_extreme', 'cate_corr']].copy()
         display['pct_extreme'] = display['pct_extreme'].map(lambda v: "{:.1%}".format(v))
         display['cate_corr'] = display['cate_corr'].map(
             lambda v: "--" if pd.isna(v) else "{:.3f}".format(v))
-        for col in ('true_ate', 'naive_bias', 'gcomp_bias'):
+        for col in ('true_ate', 'naive_error', 'gcomp_error'):
             display[col] = display[col].map(lambda v: "{:+.3f}".format(v))
         display.columns = ['Overlap', 'Effect', 'Hidden bias', 'True ATE',
-                           'Naive bias', 'g-comp bias', '% extreme', 'CATE r']
+                           'Naive error', 'g-comp error', '% extreme', 'CATE r']
 
         # Every sentence below is computed from the table, so the prose can never
         # contradict the numbers it sits beside -- the same discipline the
@@ -1238,16 +1167,30 @@ def server(input, output, session):
                 {"class": "text-muted", "style": "font-size: 0.9em;"},
                 ui.HTML("<strong>CATE r</strong> is the correlation between the estimated "
                         "and true per-patient effect &mdash; undefined when the effect is "
-                        "constant, which is precisely why constant τ made the estimator "
-                        "comparison uninformative.")
+                        "constant. Average-effect comparisons remain meaningful in that case.")
             )
         )
+
+    @output
+    @render.ui
+    def download_controls():
+        if experiment.get().run is None:
+            return None
+        return ui.TagList(ui.download_button("download_data", "Download Observed Data (.csv)", class_="btn-success"),
+                          ui.download_button("download_answers", "Download Data + Answer Key (.zip)", class_="btn-secondary"))
+
+    @output
+    @render.ui
+    def grid_download_controls():
+        if experiment.get().grid is None:
+            return None
+        return ui.download_button("download_grid", "Download Grid (.csv)", class_="btn-success")
 
     @session.download(
         filename=lambda: f"credence_scenario_grid_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
     )
     def download_grid():
-        grid = grid_data.get()
+        grid = experiment.get().grid
         if grid is None:
             yield ""
             return
@@ -1258,7 +1201,7 @@ def server(input, output, session):
         filename=lambda: f"credence_instats_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
     )
     def download_data():
-        df = sim_data.get()
+        df = (experiment.get().run['result']['data'] if experiment.get().run is not None else None)
         if df is None:
             yield ""
             return
@@ -1267,6 +1210,12 @@ def server(input, output, session):
         csv_string = df.to_csv(index=False)
         yield csv_string
 
+
+    @session.download(filename=lambda: "credence_data_and_answers.zip", media_type="application/zip")
+    def download_answers():
+        run = experiment.get().run
+        if run is not None:
+            yield answer_bundle(run)
 
 # Create app
 app = App(app_ui, server)

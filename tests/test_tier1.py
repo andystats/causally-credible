@@ -65,14 +65,8 @@ def pipe():
 # ---------------------------------------------------------------------------
 # tau(X)
 # ---------------------------------------------------------------------------
-def test_heterogeneity_does_not_move_the_average_effect():
-    """
-    The property the parameterization was designed around: turning heterogeneity on
-    changes the SPREAD of the effect, not its average.
-
-    Without this, a participant raising heterogeneity would watch the ATE drift and
-    be unable to tell whether an estimator had broken or the target had moved.
-    """
+def test_heterogeneity_uses_fixed_training_reference():
+    """The effect function is fixed in training units; report its actual cohort mean."""
     p = pipe()
     flat = generate(p, effect=EffectFunction(tau0=-5.0, heterogeneity=0.0))
     varied = generate(p, effect=EffectFunction(tau0=-5.0, heterogeneity=1.0))
@@ -80,10 +74,10 @@ def test_heterogeneity_does_not_move_the_average_effect():
     assert np.std(flat['tau_true']) == 0.0, "heterogeneity=0 should give a constant effect"
     assert np.std(varied['tau_true']) > 0.5, "heterogeneity=1 should give real spread"
 
-    # Both averages sit on tau0, up to the sampling variation of a centred index.
-    assert abs(flat['true_ate'] - (-5.0)) < 0.01
-    assert abs(varied['true_ate'] - (-5.0)) < 0.35, \
-        "heterogeneity moved the ATE to {:.3f}".format(varied['true_ate'])
+    expected = -5.0 + p['sd_y'] * p['index'].standardized(varied['X_encoded'])
+    np.testing.assert_allclose(varied['tau_true'], expected)
+    assert abs(flat['true_ate'] + 5.0) < 1e-12
+    assert abs(varied['true_ate'] - expected.mean()) < 1e-12
 
     print("    constant: ATE {:.3f}, sd(tau) {:.3f} | varied: ATE {:.3f}, sd(tau) {:.3f}".format(
         flat['true_ate'], np.std(flat['tau_true']),
@@ -256,7 +250,7 @@ def test_scenario_grid_is_complete_and_reproducible():
 
     print("    {} cells, reproducible at a fixed seed".format(len(grid)))
     print(grid[['overlap', 'heterogeneity', 'hidden_bias', 'true_ate',
-                'naive_bias', 'gcomp_bias', 'pct_extreme']].to_string(index=False))
+                'naive_error', 'gcomp_error', 'pct_extreme']].to_string(index=False))
 
 
 def test_grid_separates_the_three_axes():
@@ -284,7 +278,7 @@ def test_grid_separates_the_three_axes():
     assert by_kappa_sd.iloc[-1] > by_kappa_sd.iloc[0], "heterogeneity should widen tau"
 
     # Hidden bias drives residual bias after adjustment; overlap alone should not.
-    by_rho = grid.groupby('rho')['gcomp_bias'].apply(lambda s: s.abs().mean())
+    by_rho = grid.groupby('rho')['gcomp_error'].apply(lambda s: s.abs().mean())
     assert by_rho.iloc[-1] > by_rho.iloc[0], \
         "unmeasured confounding should leave residual bias after adjustment"
 
@@ -308,7 +302,7 @@ def test_grid_summary_reads_off_the_table():
 
 
 TESTS = [
-    test_heterogeneity_does_not_move_the_average_effect,
+    test_heterogeneity_uses_fixed_training_reference,
     test_constant_effect_path_is_unchanged,
     test_heterogeneity_is_recoverable,
     test_overlap_diagnostics_match_the_pilots_definition,

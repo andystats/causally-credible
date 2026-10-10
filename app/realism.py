@@ -123,7 +123,7 @@ def discriminator_auc(X_real, X_syn, seed=0, n_splits=5, n_estimators=200):
     HOW TO READ THE NUMBER
     ----------------------
       ~0.50  the model cannot do better than a coin flip. The synthetic rows are
-             statistically indistinguishable from real ones on these covariates.
+             not distinguished by this particular diagnostic on these covariates.
              This is the target, and it is the honest operationalisation of the
              word the app used to use for free.
       ~0.65  detectable but subtle differences.
@@ -171,10 +171,11 @@ def discriminator_auc(X_real, X_syn, seed=0, n_splits=5, n_estimators=200):
 
 def interpret_auc(auc):
     """Plain-language reading of a discriminator AUC, for display in the app."""
+    auc = max(auc, 1 - auc)
     if auc < 0.60:
-        return "Indistinguishable - the discriminator is near chance."
+        return "No clear separation by this discriminator; this is not proof of equivalent distributions."
     if auc < 0.70:
-        return "Mostly realistic - small detectable differences."
+        return "Small differences detected by this discriminator."
     if auc < 0.80:
         return "Detectably synthetic - treat conclusions with caution."
     return "Easily separated - the generator is not reproducing this data."
@@ -186,6 +187,11 @@ def realism_report(X_real, X_syn, feature_names, seed=0):
 
     X_real should be the HELD-OUT real covariates, encoded the same way as X_syn.
     """
+    real, synthetic = np.asarray(X_real), np.asarray(X_syn)
+    if (real.ndim != 2 or synthetic.ndim != 2 or real.shape[1] != len(feature_names)
+            or synthetic.shape[1] != len(feature_names) or min(len(real), len(synthetic)) < 2
+            or not np.isfinite(real).all() or not np.isfinite(synthetic).all()):
+        raise ValueError('Realism diagnostics need finite, aligned matrices with at least two rows each.')
     return {
         'covariates': covariate_report(X_real, X_syn, feature_names),
         'discriminator': discriminator_auc(X_real, X_syn, seed=seed),

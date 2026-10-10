@@ -50,6 +50,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.preprocessing import StandardScaler
+from schema import CovariateSchema, FeatureNames, column_kind, fitted_schema
 
 
 # ---------------------------------------------------------------------------
@@ -279,192 +280,22 @@ class ConditionalVAE(nn.Module):
         return x_original
 
 
-def encode_data(df, outcome_col='y', treatment_col='z', exclude_cols=None):
-    """
-    Turn a raw data frame into the numeric matrix the network consumes.
-
-    Categorical columns become one-hot dummy columns named "<col>_<level>"; that
-    naming convention is what decode_samples() below relies on to put them back
-    together, so the two functions must be read as a pair.
-
-    Note that Y is dropped here and never reaches the model. See the file header:
-    the generator learns p(X | Z) only.
-
-    Returns
-    -------
-    X : np.ndarray (float64), shape (n, p)
-    Z : np.ndarray, shape (n,)
-    feature_names : list of str, the column names of X
-    """
-    if exclude_cols is None:
-        exclude_cols = []
-
-    exclude = [outcome_col, treatment_col] + exclude_cols
-
-    X_df = df.drop(columns=[col for col in exclude if col in df.columns])
-    X_encoded = pd.get_dummies(X_df, drop_first=False)
-
-    Z = df[treatment_col].values
-
-    # Cast explicitly. pandas returns uint8 dummies on older versions and bool on
-    # pandas >= 2.0; mixing either with float columns makes .values come back as
-    # dtype object, which torch cannot consume. Being explicit means the app
-    # behaves identically on the workshop laptop and on the deployment server.
-    return X_encoded.values.astype(np.float64), Z, X_encoded.columns.tolist()
-
-
-def column_kind(series):
-    """
-    Classify an original covariate so the decoder's output can be mapped back onto
-    the values that variable is actually allowed to take.
-
-    The decoder emits a real number for EVERY column, because the network only
-    ever sees floats. What we do with that number depends on what the column was:
-
-      'categorical' -- was one-hot expanded; the dummy block holds scores.
-      'binary'      -- exactly two distinct values (0/1 indicators, and also
-                       things like 1/2 coding).
-      'integer'     -- all values whole numbers (counts, years, ordinal scales).
-      'continuous'  -- anything else; the raw decoder output is already valid.
-
-    Returns a dict describing the column, including the information needed to
-    invert it (the two levels, or the observed range).
-    """
-    if series.dtype == 'object' or isinstance(series.dtype, pd.CategoricalDtype):
-        return {'kind': 'categorical'}
-
-    values = pd.to_numeric(series, errors='coerce').dropna().values
-    if len(values) == 0:
-        return {'kind': 'continuous'}
-
-    unique = np.unique(values)
-    if len(unique) == 2:
-        return {'kind': 'binary', 'low': float(unique[0]), 'high': float(unique[1])}
-    if np.allclose(unique, np.round(unique)):
-        return {'kind': 'integer', 'min': float(unique.min()), 'max': float(unique.max())}
-    return {'kind': 'continuous'}
+def encode_data(df, outcome_col='y', treatment_col='z', exclude_cols=None, schema=None):
+    """Encode using one fitted schema; reuse it for held-out and generated rows."""
+    excluded = [outcome_col, treatment_col] + list(exclude_cols or [])
+    covariates = df.drop(columns=[c for c in excluded if c in df.columns])
+    schema = CovariateSchema.fit(covariates) if schema is None else schema
+    return schema.encode(covariates), df[treatment_col].to_numpy(), FeatureNames(schema)
 
 
 def decode_samples(X_samples, feature_names, original_df, treatment_col='z',
                    outcome_col='y', rng=None, sample_categories=True):
+    """Decode MSE reconstructions with the fitted column and category mapping.
+
+    Categorical blocks are probability estimates, not logits. This remains a
+    post-processing approximation to a Gaussian/MSE decoder; fidelity still needs
+    to be measured. A typed likelihood is a separate future model improvement.
     """
-    Turn the network's numeric output back into a data frame shaped like the input.
-
-    WHY THIS FUNCTION MATTERS (it was previously written but never called)
-    ----------------------------------------------------------------------
-    The decoder emits a real number for every column. Left alone:
-
-      * a categorical variable comes out as a handful of continuous scores like
-        (0.62, 0.31, 0.07) instead of a category;
-      * a 0/1 indicator comes out as -0.30, or 0.47, or 1.35.
-
-    Exporting that hands participants a file that no longer matches their own
-    schema. It also makes the realism check unwinnable in a completely
-    uninteresting way: a discriminator does not need to understand your data to
-    notice that real `priorPneumonia` is always exactly 0 or 1 while the synthetic
-    version is a smear of decimals. That is how this very bug was found -- the
-    Tier 0 realism diagnostic scored AUC 1.000 and the reason turned out to be
-    binary columns, not anything subtle about the generator.
-
-    SAMPLING, NOT ROUNDING (a subtle statistical point, worth pausing on)
-    ---------------------------------------------------------------------
-    Given scores implying category probabilities (0.62, 0.31, 0.07), there are two
-    ways to pick a category:
-
-      argmax   -- always take the most likely one. Every row with these scores
-                  becomes category 1. Rare categories vanish entirely and the
-                  synthetic data ends up LESS variable than the real data.
-      sampling -- draw with probability 0.62 / 0.31 / 0.07. Across many rows the
-                  category frequencies come out right.
-
-    The same choice arises for binary columns: thresholding at 0.5 is the argmax
-    move, Bernoulli sampling is the honest one. We sample in both cases, because
-    what we need to preserve is the MARGINAL DISTRIBUTION, not the most likely
-    value of any single row. `sample_categories` is exposed so the workshop can
-    switch it off and watch the realism diagnostic get worse.
-
-    A HONEST LIMITATION, AND A FORWARD REFERENCE
-    --------------------------------------------
-    Everything here is POST-HOC repair: the network was trained as if every column
-    were continuous, and we discretize its output afterwards. That is why the
-    generator still gets the joint structure between a binary column and a
-    continuous one only approximately. The architectural fix is to give the model
-    type-specific decoders and train it with the right likelihood per column --
-    which is exactly what CausalMix (Zhang, Parikh et al., 2026) does, and the
-    main reason Tier 2 of the plan contemplates adopting it.
-
-    Parameters
-    ----------
-    rng : np.random.Generator or None
-        Local generator for the category and Bernoulli draws, so decoding is
-        reproducible.
-    """
-    if rng is None:
-        rng = np.random.default_rng(0)
-
-    X_df = pd.DataFrame(X_samples, columns=feature_names)
-
-    exclude = [outcome_col, treatment_col]
-    if 'id' in original_df.columns:
-        exclude.append('id')
-    original_covariates = original_df.drop(
-        columns=[col for col in exclude if col in original_df.columns])
-
-    decoded_df = pd.DataFrame()
-
-    for col in original_covariates.columns:
-        spec = column_kind(original_covariates[col])
-
-        if spec['kind'] == 'categorical':
-            # Recover the dummy block for this column. Caveat worth knowing: if one
-            # column is named "x" and another "x_y", this prefix match can pick up
-            # the wrong block. Fine for the workshop datasets; a production version
-            # would carry an explicit column map out of encode_data().
-            cat_cols = [c for c in feature_names if c.startswith("{}_".format(col))]
-            if not cat_cols:
-                continue
-
-            scores = X_df[cat_cols].values
-            # Softmax, computed after subtracting the row max. Mathematically this
-            # changes nothing (the shift cancels), but it stops exp() overflowing
-            # when the decoder emits a large score.
-            shifted = scores - scores.max(axis=1, keepdims=True)
-            probs = np.exp(shifted)
-            probs = probs / probs.sum(axis=1, keepdims=True)
-
-            categories = [c[len(col) + 1:] for c in cat_cols]
-            if sample_categories:
-                # One categorical draw per row, using that row's probabilities.
-                picks = [rng.choice(len(categories), p=p) for p in probs]
-            else:
-                picks = probs.argmax(axis=1)
-            decoded_df[col] = [categories[i] for i in picks]
-
-        elif col not in feature_names:
-            continue
-
-        elif spec['kind'] == 'binary':
-            # Read the decoder output as a position between the two levels, clip it
-            # into [0, 1] so it can act as a probability, then draw. Sampling (not
-            # thresholding) is what keeps the synthetic prevalence close to the real
-            # one when the decoder's output sits near the middle.
-            low, high = spec['low'], spec['high']
-            span = high - low if high != low else 1.0
-            p = np.clip((X_df[col].values - low) / span, 0.0, 1.0)
-            if sample_categories:
-                draws = rng.binomial(1, p)
-            else:
-                draws = (p >= 0.5).astype(int)
-            decoded_df[col] = np.where(draws == 1, high, low)
-
-        elif spec['kind'] == 'integer':
-            # Round to the nearest whole number and keep it inside the range the
-            # variable was actually observed to take, so we never invent an age of
-            # -3 or a comorbidity count of 97.
-            values = np.round(X_df[col].values)
-            decoded_df[col] = np.clip(values, spec['min'], spec['max'])
-
-        else:
-            decoded_df[col] = X_df[col].values
-
-    return decoded_df
+    covariates = original_df.drop(columns=[c for c in (outcome_col, treatment_col) if c in original_df])
+    schema = fitted_schema(feature_names, covariates)
+    return schema.decode(X_samples, rng=rng, sample_categories=sample_categories)
