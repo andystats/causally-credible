@@ -24,5 +24,6 @@ jobs:
       - run: python tests/test_tier0.py
       - run: python tests/test_tier1.py
       - run: python tests/test_correctness.py
+      - run: python tests/test_lessons.py
       - name: Import Shiny app
         run: PYTHONPATH=app python -c "import app; assert app.app is not None"
