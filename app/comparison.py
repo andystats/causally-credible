@@ -25,8 +25,8 @@ def compare_estimates(run):
 def comparison_plot(comparison, reveal=True, units='outcome units'):
     """Point estimates from one cohort; intentionally no invented uncertainty bars."""
     # Shiny resizes figures to their container after this function returns.
-    # Constrained layout recalculates margins at draw time, including on phones.
-    fig, ax = plt.subplots(figsize=(8.4, 2.7), facecolor='white', layout='constrained')
+    # The tight layout engine recalculates margins at draw time, including on phones.
+    fig, ax = plt.subplots(figsize=(8.4, 2.7), facecolor='white', layout='tight')
     values = comparison['estimate'].to_numpy()
     truth = float(comparison['truth'].iloc[0])
     visible = np.r_[values, 0, truth] if reveal else np.r_[values, 0]
