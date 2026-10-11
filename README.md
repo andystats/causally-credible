@@ -14,7 +14,13 @@ Traditional simulation approaches use hand-specified data generating processes w
 |---------|-------------|
 | **Realism** | Learn covariate distributions p(X\|Z) from empirical data using a Conditional VAE |
 | **Truth** | Inject known treatment effects (τ) and unmeasured confounding (ρ) |
+| **Evidence** | Measure whether the realism is real, against held-out rows the model never saw |
 | **Result** | Credible benchmarks that maintain realistic data structure while providing ground truth |
+
+Note that only `p(X|Z)` is learned from your data. The outcome mechanism `f(X)` and
+the effect `τ` are chosen by the analyst — so this buys realism in the covariates
+and their relationship to treatment, not in the outcome model. That distinction is
+worth keeping in view when interpreting any benchmark built this way.
 
 ## Live App
 
@@ -26,7 +32,7 @@ Try the app without any installation:
 
 ### Requirements
 
-- Python 3.8+
+- Python 3.12 (tested on macOS)
 
 ### Setup
 
@@ -40,7 +46,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -r app/requirements.txt
+pip install -r app/requirements-lock.txt
 
 # Run the app
 shiny run app/app.py
@@ -59,21 +65,118 @@ See the [tutorial PDF](tutorial/tutorial.pdf) for a comprehensive walkthrough of
 
 ## Workflow
 
-The app follows a 4-step process:
+The app follows a five-step process:
 
 1. **Load Data**: Upload your CSV or use built-in examples (LaLonde NSW, Pneumonia Vaccine)
-2. **Learn Structure**: Train a Conditional VAE to model p(X|Z)
-3. **Generate Data**: Create synthetic data with known τ (true effect) and ρ (unmeasured confounding)
-4. **Analyze & Export**: Compare naive estimates to ground truth, download for further analysis
+2. **Learn Structure**: Train a Conditional VAE to model p(X|Z), holding out a slice for step 4
+3. **Generate Data**: Choose a baseline effect, heterogeneity and unmeasured confounding; inspect the actual cohort ATE
+4. **Analyze & Export**: Check held-out realism and estimation error; download observed data and a separate answer key
+5. **Compare Scenarios**: Run a paired 12-cell grid with common covariate and noise draws
 
 ## Key Parameters
 
 | Parameter | Description | Range |
 |-----------|-------------|-------|
-| **τ (tau)** | True average treatment effect to inject | -10 to +10 |
+| **τ₀ (baseline effect)** | Effect at the training-centered modifier value zero; equals the ATE only for constant effects | -100 to +100 |
 | **ρ (rho)** | Strength of unmeasured confounding | 0.0 to 1.0 |
+| **Training seed** | Seeds model initialisation and batch shuffling | nonnegative integer |
+| **Generation seed** | Seeds the cohort draw, separately from training | nonnegative integer |
 
-When ρ = 0, exchangeability holds and consistent estimators should recover τ. As ρ increases, unmeasured confounding biases all methods—useful for sensitivity analysis.
+When ρ = 0, exchangeability holds given the exported covariates and consistent
+estimators can target the actual cohort-average effect, subject to overlap and model
+conditions. Hidden confounding can bias adjustment based only on the observed covariates.
+
+The two seeds are deliberately separate: you can redraw a cohort without retraining,
+or retrain without moving the cohort, and know which change caused what you see.
+
+## Is the synthetic data actually realistic?
+
+Step 4 measures it rather than claiming it, comparing synthetic covariates against
+**held-out rows the generator never trained on**:
+
+| Check | What it catches |
+|-------|-----------------|
+| **Standardized mean difference** | Are the means close? |
+| **Kolmogorov–Smirnov distance** | Are the whole distributions close, not just the means? |
+| **Discriminator AUC** | Can a random forest tell real rows from synthetic ones, using all covariates jointly? |
+
+The discriminator is the strongest of the three, because it is the only one that
+sees whole rows and can therefore notice broken *correlations* between covariates.
+**AUC near 0.5** means this discriminator did not distinguish the samples under
+this evaluation design. It does not prove equivalent distributions or validate
+every dependence relevant to a downstream analysis.
+
+## Heterogeneous effects, overlap, and the scenario grid
+
+| Control | What it does |
+|---------|--------------|
+| **κ (heterogeneity)** | Makes the effect vary across patients: τ(X) = τ₀ + κ·σ_Y·m(X). The modifier is centered on training data, so the generated cohort mean may differ from τ₀. Both τ₀ and the actual ATE are reported. |
+| **λ (overlap)** | The positivity dial. With ρ = 0, λ = 0 is a randomised trial on realistic covariates; 1 = real confounding with comfortable overlap; 3 = propensities piled up at 0 and 1. |
+| **Mechanism** | *Learned* draws Z then X\|Z (confounding inherited from your data, not adjustable). *Designed* draws X then Z\|X (confounding and overlap become dials). You cannot have both from a conditional VAE — that tension is what CausalMix's overlap regulariser addresses. |
+
+Constant effects still allow comparisons of finite-sample error and robustness.
+Heterogeneity additionally enables comparison of individual-effect recovery.
+
+**Step 5** crosses overlap × heterogeneity × hidden bias into a 12-cell factorial,
+using common random draws for covariates, treatment assignment and outcome noise.
+The table reports one-run estimation errors, not Monte Carlo bias. It is inspired
+by the companion R study [`survcausal-pilot`](https://github.com/ishuryak/survcausal-pilot).
+
+## Verification
+
+```bash
+python3 tests/test_tier0.py    # generator correctness and realism
+python3 tests/test_tier1.py    # tau(X), the overlap dial, the factorial grid
+python3 tests/test_correctness.py  # schema, treatment semantics, state and export regressions
+```
+
+Runs the full pipeline headlessly on both built-in datasets and checks, among other
+things, that a correctly specified adjustment recovers τ when ρ = 0. If that fails,
+the generator is wrong and nothing downstream can be trusted.
+
+## Input and export contract
+
+Numeric 0/1 treatment labels are preserved. Other labels require an explicit
+choice of treated level. Confirmation validates complete cases, two treatment
+arms, a numeric varying outcome, and at least 40 complete rows. Loading new data
+or changing column roles clears the model and downstream results; training and
+simulation controls invalidate the dependent stages.
+
+One fitted schema is reused for training, holdout and decoding. A category absent
+from holdout retains its training column. A category found only in holdout stops
+training with a validation message: change the training seed/holdout fraction or
+supply more data so training covers all levels. Categories are decoded as
+reconstructed probabilities, not logits. This remains a post-processing
+approximation to an MSE model; it does not guarantee fidelity.
+
+`observed.csv` contains outcome, treatment and input covariates only.
+The optional ZIP also contains `answer_key.csv` (counterfactuals, individual
+truth and hidden confounder) and `manifest.json`. The files align by row order;
+keep answer-key columns out of learner features. Uploaded names such as `U` or
+`y0` remain ordinary covariates and cannot be overwritten by the separate oracle.
+
+Designed-mode assignment probabilities are labelled `P(Z=1|X)` or `P(Z=1|X,U)`.
+The latter is an oracle diagnostic. Learned-mode overlap given observed X is
+reported as unavailable instead of incorrectly showing its marginal arm draw.
+
+The October fixes change generated draws and the export contract. Older scripts
+that expected oracle columns in the observed CSV should read the separate answer
+key explicitly. Reproducibility is for the same code, inputs and runtime; pinning
+versions is not a promise of bit-identical results on every hardware platform.
+
+The hosted app is a separate deployment; opening or merging this PR does not
+update that service.
+
+## Development log
+
+[`devlog/devlog.pdf`](devlog/devlog.tex) — a Beamer companion to the Module 5
+tutorial that records how this app is being built, and teaches the Credence
+framework, its evolution toward CausalMix, and the connection to `survcausal-pilot`
+along the way. These August slides and the tutorial PDF are historical teaching
+materials, not the current input/export contract. In particular, their claims
+about a fixed ATE under heterogeneity and mixed oracle exports are superseded
+by the definitions above. A broader teaching-material refresh is deferred.
+Build with `latexmk -pdf devlog.tex`.
 
 ## References
 

@@ -18,3 +18,14 @@ venv/
 
 # Claude Code
 .claude/
+
+# LaTeX build artifacts (the compiled devlog.pdf IS committed)
+devlog/*.aux
+devlog/*.fdb_latexmk
+devlog/*.fls
+devlog/*.log
+devlog/*.nav
+devlog/*.out
+devlog/*.snm
+devlog/*.toc
+devlog/*.png

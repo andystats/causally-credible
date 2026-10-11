@@ -1,0 +1,28 @@
+name: Verify teaching experiments
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: app/requirements-lock.txt
+      - run: python -m pip install -r app/requirements-lock.txt
+      - run: python tests/test_tier0.py
+      - run: python tests/test_tier1.py
+      - run: python tests/test_correctness.py
+      - name: Import Shiny app
+        run: PYTHONPATH=app python -c "import app; assert app.app is not None"

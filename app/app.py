@@ -16,7 +16,15 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 
-from cvae_model import ConditionalVAE, encode_data, decode_samples
+# The app is deliberately thin. The three things worth understanding live in
+# their own modules so they can be read -- and tested -- without Shiny in the way:
+#   cvae_model.py  learns p(X | Z)                       (realism)
+#   dgp.py         chooses tau, rho and f(X)             (truth)
+#   realism.py     measures whether the realism is real  (evidence)
+# tests/test_tier0.py runs all three headlessly.
+from examples import load_example
+from scenarios import summarize_grid
+from workflow import ExperimentSession, treatment_levels, analysis_summary, answer_bundle
 
 # Set style
 sns.set_style("whitegrid")
@@ -262,7 +270,7 @@ app_ui = ui.page_fluid(
         ui.tags.div({"class": "app-title"}, "Module 5: Credence Framework Tutorial"),
         ui.tags.p(
             {"class": "app-subtitle"},
-            "Generate realistic synthetic data with known ground truth to validate causal inference methods"
+            "Generate semi-synthetic data with known truth and measure its realism"
         ),
     ),
 
@@ -279,7 +287,11 @@ app_ui = ui.page_fluid(
                 ui.strong("Observed confounding:"),
                 " learned from the empirical relationship ",
                 ui.tags.code("p(X|Z)"),
-                ", so generated data are realistic and near-indistinguishable from the observed sample."
+                ui.HTML(". Only \\(p(X\\mid Z)\\) is learned from your data &mdash; the outcome "
+                        "mechanism and the effect are chosen by you in Step 3. How closely the "
+                        "generated covariates match the real ones is <strong>measured in "
+                        "Step 4</strong>, against rows the model never saw, rather than asserted "
+                        "here.")
             ),
             ui.tags.li(
                 ui.strong("Unobserved confounding:"),
@@ -289,7 +301,7 @@ app_ui = ui.page_fluid(
             ),
             ui.tags.li(
                 ui.strong("Ground truth:"),
-                ui.HTML(" you set the Average Treatment Effect (ATE) \\((\\tau)\\); Credence also supports heterogeneous effects \\((\\tau(X))\\) and bias functions.")
+                ui.HTML(" you set a baseline effect and optional heterogeneity. The actual cohort ATE is computed from the generated individual effects.")
             ),
         ),
 
@@ -297,8 +309,8 @@ app_ui = ui.page_fluid(
         ui.tags.div(
             {"class": "module-ref"},
             ui.HTML("<strong>From Module 4:</strong> We used <code>simcausal</code> to generate data with parametric assumptions. "
-                    "Here, we use a CVAE to learn the <em>actual</em> covariate structure from real data, "
-                    "making our synthetic benchmarks more realistic for validating TMLE and other methods.")
+                    "Here, we use a CVAE to approximate the covariate structure of real data, "
+                    "then check held-out fidelity before using the synthetic benchmarks to evaluate TMLE and other methods.")
         ),
 
         # Math Notes Details
@@ -315,8 +327,8 @@ app_ui = ui.page_fluid(
                 ui.p(ui.HTML("The VAE is trained by optimizing the ELBO (Evidence Lower Bound) loss function. This objective balances two critical goals: ensuring the decoded data is a faithful <strong>reconstruction</strong> of the original, while also <strong>regularizing</strong> the latent space to be smooth and well-behaved, which is crucial for generating new data.")),
                 ui.p("To create a simulation with a known 'ground truth' answer, we can then define the rules for this synthetic world:"),
                 ui.tags.ul(
-                    ui.tags.li(ui.HTML("<strong>Unobserved Confounding:</strong> We can specify how an unobserved variable \\(U\\) influences treatment selection, for instance: \\(\\Pr(Z=1 \\mid U) = \\text{logistic}(\\alpha + \\rho U)\\).")),
-                    ui.tags.li(ui.HTML("<strong>Potential Outcomes:</strong> This same confounder can also affect the outcomes. We can define potential outcomes as \\(Y(0) = f(X) + \\gamma U + \\varepsilon\\) and \\(Y(1)=Y(0)+\\tau\\). By design, the true Average Treatment Effect (ATE) we want the causal methods to find is simply \\(\\E[Y(1){-}Y(0)] = \\tau\\)."))
+                    ui.tags.li(ui.HTML("<strong>Designed treatment assignment:</strong> \\(\\Pr(Z=1 \\mid X,U) = \\operatorname{logistic}(\\alpha + \\lambda m(X) + \\rho U)\\). The learned mechanism instead draws treatment before covariates.")),
+                    ui.tags.li(ui.HTML("<strong>Potential outcomes:</strong> \\(Y(0)=f(X)+\\gamma\\rho\\sigma_Y U+\\varepsilon\\), \\(Y(1)=Y(0)+\\tau(X)\\), and \\(\\tau(X)=\\tau_0+\\kappa\\sigma_Y m(X)\\). The reported cohort ATE is the average of these individual effects; it equals the baseline effect when heterogeneity is zero."))
                 )
             )
         ),
@@ -342,7 +354,7 @@ app_ui = ui.page_fluid(
             ui.tags.ul(
                 ui.tags.li(ui.HTML("\\(X\\): covariates; \\(Z\\): binary treatment; \\(Y\\): outcome; \\(Y(0), Y(1)\\): potential outcomes.")),
                 ui.tags.li(ui.HTML("\\(U\\): unobserved confounder; \\(f(X)\\): baseline outcome function.")),
-                ui.tags.li(ui.HTML("\\(\\tau\\): Average Treatment Effect (ATE); \\(\\alpha\\): treatment-logit intercept; \\(\\rho\\): strength of unobserved confounding.")),
+                ui.tags.li(ui.HTML("\\(\\tau_0\\): baseline effect; \\(\\tau(X)\\): individual effect; \\(\\kappa\\): heterogeneity; \\(\\alpha\\): treatment-logit intercept; \\(\\rho\\): hidden-confounding strength.")),
                 ui.tags.li(ui.HTML("Encoder \\((q_\\phi(u \\mid x,z))\\), Decoder \\((p_\\theta(x \\mid u,z))\\); ELBO \\((\\mathscr{L}(\\theta,\\phi))\\)."))
             )
         ),
@@ -371,8 +383,7 @@ app_ui = ui.page_fluid(
                 ui.tags.code("Y"), " is treated as numeric; factors are supported in ", ui.tags.code("X"), "."
             ),
             ui.p(
-                ui.strong("Note:"), " The Credence framework supports effect heterogeneity and bias functions of covariates. This app uses a constant ",
-                ui.tags.code("τ"), " and a simple ", ui.tags.code("f(X)"), " for clarity."
+                ui.strong("Note:"), " The baseline effect is constant when heterogeneity is zero. Otherwise the effect varies with covariates, and the actual cohort ATE is reported after generation."
             )
         ),
 
@@ -388,7 +399,9 @@ app_ui = ui.page_fluid(
                 ui.input_action_button("load_example", "Load Example", class_="btn-secondary")
             )
         ),
+        ui.output_ui("example_note"),
         ui.output_ui("csv_controls"),
+        ui.output_ui("treatment_controls"),
         ui.input_action_button("process_data", "Confirm Data", class_="btn-primary"),
         ui.output_text_verbatim("data_summary")
     ),
@@ -405,39 +418,147 @@ app_ui = ui.page_fluid(
             ui.p("Interpretation: If treated and control have different covariate patterns, the model learns those differences, so generated data inherit realistic observed bias.")
         ),
 
-        ui.input_slider("epochs", "Training Epochs", min=10, max=200, value=50, step=10),
+        ui.tags.details(
+            ui.tags.summary("Why the batch size matters (and a bug this app used to have)"),
+            ui.tags.div(
+                {"class": "math-note"},
+                ui.p(ui.HTML(
+                    "Training takes <strong>one gradient step per batch</strong>. With "
+                    "<code>batch size = full dataset</code>, an epoch is a single step, so "
+                    "50 epochs means 50 steps in total &mdash; nowhere near convergence. "
+                    "That is what this app did until now, while telling you the output was "
+                    "&ldquo;near-indistinguishable&rdquo; from your data.")),
+                ui.p(ui.HTML(
+                    "Set the batch size to the full dataset and train for a few epochs to "
+                    "<em>reproduce the old behaviour</em>, then compare the realism score in "
+                    "Step 4. The failure mode is more convincing when you can see it.")),
+                ui.p(ui.HTML(
+                    "The <strong>holdout</strong> is set aside before training and never shown "
+                    "to the model. Step 4 compares synthetic data against those unseen rows, "
+                    "because a flexible generator scored against its own training data can win "
+                    "by memorising &mdash; which is both a meaningless result and a privacy risk."))
+            )
+        ),
+
+        ui.row(
+            ui.column(3, ui.input_slider("epochs", "Training Epochs",
+                                         min=1, max=400, value=150, step=1)),
+            ui.column(3, ui.input_select("batch_size", "Batch Size",
+                                         choices={"32": "32", "64": "64", "128": "128",
+                                                  "256": "256", "0": "Full dataset (the old bug)"},
+                                         selected="128")),
+            ui.column(3, ui.input_slider("holdout_frac", "Holdout Fraction",
+                                         min=0.1, max=0.5, value=0.25, step=0.05)),
+            ui.column(3, ui.input_numeric("train_seed", "Training Seed", value=1, min=0, step=1))
+        ),
         ui.input_action_button("learn_model", "Train CVAE Model", class_="btn-primary"),
-        ui.output_text_verbatim("training_output")
+        ui.output_text_verbatim("training_output"),
+        ui.output_plot("elbo_plot")
     ),
 
     # Step 3: Generate Data
     ui.tags.div(
         {"class": "step-panel", "id": "step3"},
         ui.h3("Step 3: Generate Biased Synthetic Data"),
-        ui.p("Create new data using the learned structure. You set the ground-truth effect (ATE) and inject unmeasured confounding via a latent ", ui.tags.code("U"), "."),
+        ui.p("Create new data using the learned structure. You set the baseline effect and inject unmeasured confounding via a latent ", ui.tags.code("U"), "."),
 
         ui.tags.details(
             ui.tags.summary("Data-generating process"),
+            ui.p("The learned mechanism draws treatment first, then covariates conditional on treatment. "
+                 "The designed mechanism draws covariates first, then assigns treatment using the overlap and hidden-confounding controls."),
+            ui.p("Untreated outcomes combine the standardized prognostic index, gamma × rho × U × training-outcome SD, "
+                 "and noise. Treated outcomes add the per-person effect. The reported true ATE is the mean of those effects."),
+        ),
+
+        ui.tags.details(
+            ui.tags.summary("What f(X) is, and why it is now spelled out"),
             ui.tags.div(
                 {"class": "math-note"},
-                ui.p(ui.HTML("Assignment: \\((\\Pr(Z{=}1 \\mid U) = \\text{logistic}(\\alpha + \\rho U))\\). Larger \\((\\rho)\\) means stronger unobserved confounding.")),
-                ui.p(ui.HTML("Outcomes: \\((Y(0) = f(X) + \\gamma U + \\varepsilon,\\; Y(1)=Y(0)+\\tau)\\). The ATE is \\((\\tau)\\).")),
-                ui.p(ui.HTML("\\(f(X)\\) summarizes observed confounding learned from the data; \\(U\\) violates exchangeability in a controlled way.")),
-                ui.p(ui.HTML("This app uses a constant \\(\\tau\\); the Credence framework supports heterogeneity \\(\\tau(X)\\) and bias functions of \\(X\\)."))
+                ui.p(ui.HTML(
+                    "\\(f(X)\\) is the <strong>prognostic index</strong>: how the observed "
+                    "covariates move the untreated outcome \\(Y(0)\\). It is the entire "
+                    "outcome component of observed confounding, so it should be a stated modelling "
+                    "choice rather than an accident.")),
+                ui.p(ui.HTML(
+                    "It previously was an accident. \\(f(X)\\) was an unweighted mean of the "
+                    "covariates <em>on their raw scale</em>, restricted to columns whose name "
+                    "contained no underscore. So earnings in dollars drowned out age in years, "
+                    "and any covariate you happened to name <code>prior_vaccine</code> was "
+                    "silently dropped &mdash; exported to you as a confounder while influencing "
+                    "nothing.")),
+                ui.p(ui.HTML(
+                    "Now every covariate is standardised first, then combined with "
+                    "<strong>weights shown in the table below</strong>. Equal weights is the "
+                    "default. The weights remain fixed; "
+                    "effect variation is controlled separately below."))
             )
         ),
 
         ui.row(
-            ui.column(4, ui.input_numeric("tau", "True ATE (τ)", value=-5, min=-100, max=100, step=0.5)),
-            ui.column(4, ui.input_numeric("rho", "Unmeasured Confounding (ρ)", value=0.0, min=0.0, max=1.0, step=0.1)),
-            ui.column(4, ui.input_numeric("n_sim", "Sample Size", value=1500, min=100, max=10000, step=100))
+            ui.column(3, ui.input_numeric("tau", "Baseline effect (τ₀)", value=-5, min=-100, max=100, step=0.5)),
+            ui.column(3, ui.input_numeric("rho", "Unmeasured Confounding (ρ)", value=0.0, min=0.0, max=1.0, step=0.1)),
+            ui.column(3, ui.input_numeric("n_sim", "Sample Size", value=1500, min=100, max=10000, step=100)),
+            ui.column(3, ui.input_numeric("gen_seed", "Generation Seed", value=7, min=0, step=1))
+        ),
+
+        ui.tags.details(
+            ui.tags.summary("Effect heterogeneity and the actual average effect"),
+            ui.p("With zero heterogeneity, everyone has the same effect. Estimators can still differ in finite-sample "
+                 "error or robustness; heterogeneous effects additionally let us study patient-level benefit."),
+            ui.p("The effect is τ(X) = τ₀ + κ × training-outcome SD × m(X). "
+                 "The modifier m(X) is centered on the training data, not recentered on each new cohort."),
+            ui.p("τ₀ is the baseline effect at m(X)=0. The generated population can have a different modifier mean, "
+                 "so its actual average effect may differ from τ₀. Both are reported explicitly."),
+        ),
+
+        ui.tags.details(
+            ui.tags.summary("Overlap: the positivity dial, and the trade it forces"),
+            ui.tags.div(
+                {"class": "math-note"},
+                ui.p(ui.HTML(
+                    "<strong>Learned</strong> mechanism: draw \\(Z\\), then \\(X \\mid Z\\) from "
+                    "the CVAE. Confounding is inherited from your real data &mdash; realistic, "
+                    "but not adjustable.")),
+                ui.p(ui.HTML(
+                    "<strong>Designed</strong> mechanism: draw \\(X\\) first, then "
+                    "$$\\Pr(Z=1 \\mid X, U) = \\text{logistic}(\\alpha + \\lambda\\, m(X) + \\rho U).$$ "
+                    "With no hidden confounding, \\(\\lambda\\)=0 is a randomised trial on realistic "
+                    "covariates, 1 is real confounding with comfortable overlap, 3 piles "
+                    "propensities up at 0 and 1.")),
+                ui.p(ui.HTML(
+                    "<strong>You cannot have both.</strong> A conditional VAE gives you "
+                    "\\(p(X\\mid Z)\\); a designed propensity gives you \\(e(X)\\); they pull in "
+                    "opposite directions. Getting realistic covariates <em>and</em> a controlled "
+                    "propensity from one model is exactly what CausalMix's overlap regulariser "
+                    "is for."))
+            )
+        ),
+
+        ui.row(
+            ui.column(4, ui.input_select(
+                "mechanism", "Treatment mechanism",
+                choices={"learned": "Learned from data (not adjustable)",
+                         "designed": "Designed (overlap is a dial)"},
+                selected="designed")),
+            ui.column(4, ui.input_slider("overlap_strength", "Overlap / confounding (λ)",
+                                         min=0.0, max=4.0, value=1.0, step=0.25)),
+            ui.column(4, ui.input_slider("heterogeneity", "Effect heterogeneity (κ)",
+                                         min=0.0, max=3.0, value=0.0, step=0.25))
         ),
         ui.tags.p(
             {"class": "text-muted", "style": "font-size: 0.9em; margin-top: -10px;"},
-            ui.HTML("ATE typical range: -10 to 10. ρ ranges: 0.0 (none) to 0.6+ (strong). <br><strong>Note:</strong> When ρ=0, the unobserved confounder U has zero influence and is excluded from the downloaded dataset.")
+            ui.HTML("Baseline effect typical range: -10 to 10. ρ ranges: 0.0 (none) to 0.6+ (strong). <br><strong>Note:</strong> The generated hidden confounder and counterfactual outcomes are in the separate answer key, not the observed-data download.")
+        ),
+        ui.tags.p(
+            {"class": "text-muted", "style": "font-size: 0.9em;"},
+            ui.HTML("The <strong>generation seed</strong> is separate from the training seed on "
+                    "purpose: it lets you redraw a cohort without retraining the model, or "
+                    "retrain without moving the cohort, so you always know which change caused "
+                    "what you are looking at. Same seed, same data &mdash; every time.")
         ),
         ui.input_action_button("generate_data", "Generate Synthetic Data", class_="btn-primary"),
-        ui.output_text_verbatim("generation_output")
+        ui.output_text_verbatim("generation_output"),
+        ui.output_ui("fx_weights")
     ),
 
     # Step 4: Analyze & Export
@@ -450,12 +571,53 @@ app_ui = ui.page_fluid(
             ui.tags.summary("Why naive is biased"),
             ui.tags.div(
                 {"class": "math-note"},
-                ui.p(ui.HTML("Naive difference equals \\((\\tau + [\\mathbb{E}(Y(0) \\mid Z{=}1) - \\mathbb{E}(Y(0) \\mid Z{=}0)])\\). If either observed confounding (via \\((X)\\)) or unobserved \\((U)\\) shifts \\((Y(0))\\) across groups, bias appears."))
+                ui.p("The observed treated-minus-control contrast can differ from the cohort-average effect because the treatment groups have different baseline outcomes and, with heterogeneity, different effects. One run shows estimation error; repeated runs are needed to measure bias."),
             )
         ),
 
         ui.output_ui("analysis_results"),
         ui.output_plot("outcome_plot"),
+
+        ui.tags.hr(),
+        ui.h4("Is the synthetic data actually realistic?"),
+        ui.p(ui.HTML(
+            "Everything above rests on a claim: that these synthetic covariates resemble "
+            "your real ones. That claim used to be asserted and never checked. Here it is "
+            "measured, against the <strong>holdout rows the model never saw</strong>.")),
+
+        ui.tags.details(
+            ui.tags.summary("How to read these three numbers"),
+            ui.tags.div(
+                {"class": "math-note"},
+                ui.tags.ol(
+                    ui.tags.li(ui.HTML(
+                        "<strong>SMD</strong> &mdash; difference in means, in pooled standard "
+                        "deviations. Below 0.1 is the usual threshold for negligible.")),
+                    ui.tags.li(ui.HTML(
+                        "<strong>KS distance</strong> &mdash; the largest gap between the two "
+                        "cumulative distributions. Catches differences in spread and shape that "
+                        "a difference in means cannot.")),
+                    ui.tags.li(ui.HTML(
+                        "<strong>Discriminator AUC</strong> &mdash; a random forest is asked to "
+                        "tell real rows from synthetic ones, cross-validated so it cannot cheat "
+                        "by memorising. <strong>0.5 is the target</strong>: it means the "
+                        "generator has fooled it completely. This is the rare model you want to "
+                        "perform badly."))
+                ),
+                ui.p(ui.HTML(
+                    "Why all three: a generator can match every mean (SMD &asymp; 0) and still "
+                    "get the shapes wrong (KS large). It can match every individual "
+                    "distribution and still destroy the <em>correlations between</em> "
+                    "covariates &mdash; and only the discriminator, which sees whole rows at "
+                    "once, will catch that.")),
+                ui.p(ui.HTML(
+                    "<strong>Try this:</strong> go back to Step 2, set the batch size to "
+                    "&ldquo;Full dataset&rdquo; with 5 epochs, retrain, and regenerate. Watch "
+                    "the AUC climb toward 1.0. That is what the old version of this app was "
+                    "shipping."))
+            )
+        ),
+        ui.output_ui("realism_results"),
 
         ui.tags.hr(),
         ui.h4("Next Steps: Apply Methods from Module 4"),
@@ -499,7 +661,59 @@ app_ui = ui.page_fluid(
             ui.HTML("<strong>Workshop Materials:</strong> This app is part of the instats SSC 2026 Accreditation Workshop on Modern Analysis of Real-World Data Following the Causal Roadmap & Applications of Causal AI.")
         ),
 
-        ui.download_button("download_data", "Download Synthetic Dataset (.csv)", class_="btn-success"),
+        ui.p("The CSV contains observed data only. The separate answer bundle includes ground truth; "
+             "keep its answer-key columns out of learner features. Rows align by CSV row order."),
+        ui.output_ui("download_controls"),
+    ),
+
+    # Step 5: Factorial scenario grid
+    ui.tags.div(
+        {"class": "step-panel", "id": "step5"},
+        ui.h3("Step 5: Factorial Scenario Grid"),
+        ui.p(ui.HTML(
+            "One dramatic scenario can show an estimator failing. It cannot show "
+            "<em>why</em>, because several things are wrong at once. So we cross the three "
+            "axes Step 3 made independent and move one at a time.")),
+
+        ui.tags.details(
+            ui.tags.summary("The design, and where it comes from"),
+            ui.tags.div(
+                {"class": "math-note"},
+                ui.p(ui.HTML(
+                    "This borrows the design of the companion R study, "
+                    "<code>survcausal-pilot</code>, whose headline result is a 2&times;2 "
+                    "factorial crossing confounding shape with hazard shape at a single fixed "
+                    "effect size &mdash; so that any difference between cells is attributable "
+                    "to <strong>one</strong> cause. Its README puts it plainly: the alternative "
+                    "&ldquo;would change several things at once and make the cause "
+                    "ambiguous.&rdquo;")),
+                ui.tags.ul(
+                    ui.tags.li(ui.HTML("<strong>overlap (λ)</strong> &mdash; how steeply "
+                                       "treatment depends on covariates")),
+                    ui.tags.li(ui.HTML("<strong>heterogeneity (κ)</strong> &mdash; how much "
+                                       "the effect varies across patients")),
+                    ui.tags.li(ui.HTML("<strong>hidden bias (ρ)</strong> &mdash; how strongly "
+                                       "an unmeasured confounder acts"))
+                ),
+                ui.p(ui.HTML(
+                    "Watch the <strong>% extreme</strong> column. That is the positivity "
+                    "diagnostic the R pilot already computes and never varies &mdash; across "
+                    "all four of its design cells it reads 0.00000, 0.00000, 0.00036, 0.00047. "
+                    "A diagnostic that never moves teaches nothing. Here it moves, and you can "
+                    "inspect estimation error. Repeated runs are needed to measure bias."))
+            )
+        ),
+
+        ui.row(
+            ui.column(4, ui.input_numeric("grid_n", "Rows per cell", value=1500,
+                                          min=200, max=8000, step=100)),
+            ui.column(4, ui.input_numeric("grid_seed", "Grid seed", value=101, min=0, step=1)),
+            ui.column(4, ui.input_action_button("run_grid", "Run 12-cell grid",
+                                                class_="btn-primary"))
+        ),
+        ui.output_text_verbatim("grid_status"),
+        ui.output_ui("grid_results"),
+        ui.output_ui("grid_download_controls"),
     ),
 )
 
@@ -508,53 +722,71 @@ app_ui = ui.page_fluid(
 def server(input, output, session):
     # Reactive values
     data_loaded = reactive.Value(None)
-    data_processed = reactive.Value(None)
-    cvae_model = reactive.Value(None)
-    encoded_features = reactive.Value(None)
-    sim_data = reactive.Value(None)
+    data_note = reactive.Value("")
+    experiment = reactive.Value(ExperimentSession())
 
-    # Load example data
+    def report_error(exc):
+        ui.notification_show(str(exc), type="error", duration=12)
+
+    @reactive.Effect
+    @reactive.event(input.outcome_col, input.treatment_col, input.treated_level)
+    def invalidate_roles():
+        experiment.set(ExperimentSession())
+
+    @reactive.Effect
+    @reactive.event(input.train_seed, input.holdout_frac, input.epochs, input.batch_size)
+    def invalidate_training():
+        old = experiment.get()
+        experiment.set(ExperimentSession(confirmed=old.confirmed))
+
+    @reactive.Effect
+    @reactive.event(input.tau, input.rho, input.n_sim, input.gen_seed,
+                    input.heterogeneity, input.mechanism, input.overlap_strength)
+    def invalidate_generation():
+        old = experiment.get()
+        experiment.set(ExperimentSession(confirmed=old.confirmed, trained=old.trained))
+
+    @reactive.Effect
+    @reactive.event(input.grid_n, input.grid_seed)
+    def invalidate_grid():
+        old = experiment.get()
+        experiment.set(ExperimentSession(confirmed=old.confirmed, trained=old.trained, run=old.run))
+
+    # Load example data. The datasets themselves live in examples.py so the test
+    # suite exercises exactly what the workshop runs.
     @reactive.Effect
     @reactive.event(input.load_example)
     def _():
-        if input.example_dataset() == "lalonde":
-            try:
-                # Try to load from file if available
-                lalonde_path = Path(__file__).parent / "lalonde_nsw.csv"
-                if lalonde_path.exists():
-                    df = pd.read_csv(lalonde_path)
-                    df = df.rename(columns={"treat": "treatment", "re78": "outcome"})
-                else:
-                    # Create a minimal example if file doesn't exist
-                    df = pd.DataFrame({
-                        'treatment': np.random.binomial(1, 0.5, 100),
-                        'outcome': np.random.randn(100) * 1000 + 5000,
-                        'age': np.random.randint(18, 65, 100),
-                        'education': np.random.randint(8, 18, 100),
-                    })
-                data_loaded.set(df)
-            except Exception as e:
-                print(f"Error loading example: {e}")
-        elif input.example_dataset() == "pneumonia":
-            # Create pneumonia vaccine example similar to Module 4
-            np.random.seed(123)
-            n = 1000
-            age = np.random.normal(65, 15, n)
-            prior_pneumonia = np.random.binomial(1, 1/(1+np.exp(-(-2 + 0.03*age))), n)
-            prior_vaccine = np.random.binomial(1, 1/(1+np.exp(-(-1 + 0.02*age + 0.5*prior_pneumonia))), n)
-            # Treatment with confounding
-            treatment = np.random.binomial(1, 1/(1+np.exp(-(-2.5 + 0.025*age + 0.8*prior_pneumonia + 1.2*prior_vaccine))), n)
-            # Outcome (will be replaced by our simulation)
-            outcome = np.random.normal(0, 1, n)
-
-            df = pd.DataFrame({
-                'treatment': treatment,
-                'outcome': outcome,
-                'age': age,
-                'priorPneumonia': prior_pneumonia,
-                'priorVaccine': prior_vaccine
-            })
+        name = input.example_dataset()
+        if not name:
+            return
+        experiment.set(ExperimentSession())
+        try:
+            df, note = load_example(name)
             data_loaded.set(df)
+            data_note.set(note)
+        except Exception as e:
+            data_loaded.set(None)
+            data_note.set("Could not load example: {}".format(e))
+
+    @output
+    @render.ui
+    def example_note():
+        note = data_note.get()
+        if not note:
+            return None
+        # A loud warning when the dataset is not what its label claims. The LaLonde
+        # option falls back to a placeholder when app/lalonde_nsw.csv is absent, and
+        # the old app said nothing at all -- so a participant could analyse pure
+        # noise for an hour believing it was a famous evaluation dataset.
+        is_warning = note.startswith("NOT ") or note.startswith("Could not")
+        colour = "#fd7e14" if is_warning else "#1c8b4a"
+        return ui.tags.div(
+            {"class": "module-ref",
+             "style": "border-left-color: {};".format(colour)},
+            ui.HTML("<strong>{}</strong> {}".format(
+                "Heads up:" if is_warning else "Loaded:", note))
+        )
 
     # Load uploaded CSV
     @reactive.Effect
@@ -562,8 +794,16 @@ def server(input, output, session):
     def _():
         file_info = input.csv_file()
         if file_info is not None:
-            df = pd.read_csv(file_info[0]["datapath"])
-            data_loaded.set(df)
+            experiment.set(ExperimentSession())
+            data_note.set("")
+            try:
+                df = pd.read_csv(file_info[0]["datapath"])
+                if len(df.columns) < 3:
+                    raise ValueError("Include outcome, treatment and at least one covariate.")
+                data_loaded.set(df)
+            except Exception as exc:
+                data_loaded.set(None)
+                report_error(exc)
 
     # Show column selectors
     @output
@@ -584,155 +824,249 @@ def server(input, output, session):
                           choices=list(df.columns), selected=treatment_default)
         )
 
-    # Process data
+    @output
+    @render.ui
+    def treatment_controls():
+        df = data_loaded.get()
+        if df is None or input.treatment_col() not in df:
+            return None
+        levels = treatment_levels(df[input.treatment_col()])
+        if set(levels) == {0, 1}:
+            choices, selected = {"1": "1 (treated); 0 (control)"}, "1"
+        else:
+            choices = {"": "Choose the treated level", **{str(i): str(v) for i, v in enumerate(levels)}}
+            selected = ""
+        return ui.input_select("treated_level", "Treatment meaning", choices=choices, selected=selected)
+
     @reactive.Effect
     @reactive.event(input.process_data)
-    def _():
+    def confirm_data():
+        experiment.set(ExperimentSession())
         df = data_loaded.get()
         if df is None:
+            report_error(ValueError("Load a dataset first."))
             return
+        try:
+            levels = treatment_levels(df[input.treatment_col()])
+            selection = input.treated_level()
+            treated = 1 if set(levels) == {0, 1} else (levels[int(selection)] if selection else None)
+            experiment.set(ExperimentSession().confirm(df, input.outcome_col(), input.treatment_col(), treated))
+        except Exception as exc:
+            report_error(exc)
 
-        # Check treatment is binary
-        if df[input.treatment_col()].nunique() != 2:
-            return
-
-        # Create processed dataset
-        processed = df.copy()
-        processed = processed.dropna()
-
-        # Ensure treatment is 0/1
-        z_vals = processed[input.treatment_col()].unique()
-        z_map = {z_vals[0]: 0, z_vals[1]: 1}
-        processed[input.treatment_col()] = processed[input.treatment_col()].map(z_map)
-
-        data_processed.set(processed)
-
-    # Show data summary
     @output
     @render.text
     def data_summary():
-        df = data_processed.get()
-        if df is None:
+        confirmed = experiment.get().confirmed
+        if confirmed is None:
             return ""
+        return (f"Data confirmed: {len(confirmed['data'])} complete observations "
+                f"({confirmed['dropped_rows']} rows removed).\n"
+                f"Treatment: {confirmed['treatment_col']} — 0 = {confirmed['treatment_mapping']['0']}, "
+                f"1 = {confirmed['treatment_mapping']['1']}\nOutcome: {confirmed['outcome_col']}")
 
-        return f"Data confirmed: {len(df)} complete observations.\nTreatment: {input.treatment_col()}\nOutcome: {input.outcome_col()}"
-
-    # Train CVAE
     @reactive.Effect
     @reactive.event(input.learn_model)
-    def _():
-        df = data_processed.get()
-        if df is None:
-            return
-
-        # Encode data
-        X, Z, feature_names = encode_data(
-            df,
-            outcome_col=input.outcome_col(),
-            treatment_col=input.treatment_col()
-        )
-
-        # Train model
-        model = ConditionalVAE(input_dim=X.shape[1], latent_dim=16)
-        model.fit(X, Z, epochs=input.epochs(), lr=1e-3, verbose=True)
-
-        cvae_model.set(model)
-        encoded_features.set((X, Z, feature_names))
+    def train_model():
+        old = experiment.get()
+        experiment.set(ExperimentSession(confirmed=old.confirmed))
+        try:
+            experiment.set(experiment.get().train(seed=int(input.train_seed()),
+                holdout_frac=float(input.holdout_frac()), epochs=int(input.epochs()),
+                batch_size=int(input.batch_size()) or None))
+        except Exception as exc:
+            report_error(exc)
 
     # Training output
     @output
     @render.text
     def training_output():
-        model = cvae_model.get()
-        if model is None:
+        state = experiment.get().trained
+        if state is None:
             return ""
-        return "CVAE training complete!"
 
-    # Generate synthetic data
+        history = state['model'].history_
+        first, last = history[0], history[-1]
+        steps_per_epoch = last['steps']
+        return (
+            "CVAE training complete.\n"
+            "  trained on {} rows, {} held out for the realism check\n"
+            "  {} epochs x {} gradient step(s) per epoch = {} steps total\n"
+            "  negative ELBO per observation: {:.4f} -> {:.4f}\n"
+            "  final split: reconstruction {:.4f} + KL {:.4f}"
+        ).format(
+            state['n_train'], state['n_hold'],
+            len(history), steps_per_epoch, len(history) * steps_per_epoch,
+            first['neg_elbo'], last['neg_elbo'], last['recon'], last['kl'])
+
+    # The training curve. Reconstruction and KL are drawn separately because the
+    # interesting behaviour is the trade-off between them: reconstruction drops
+    # quickly, then the KL term starts to resist and progress slows.
+    @output
+    @render.plot
+    def elbo_plot():
+        state = experiment.get().trained
+        if state is None:
+            return None
+
+        history = state['model'].history_
+        epochs = [h['epoch'] for h in history]
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
+
+        axes[0].plot(epochs, [h['neg_elbo'] for h in history],
+                     color='#4A9EFF', linewidth=2)
+        axes[0].set_title('Negative ELBO per observation (lower is better)')
+        axes[0].set_xlabel('Epoch')
+
+        axes[1].plot(epochs, [h['recon'] for h in history],
+                     color='#fd7e14', linewidth=2, label='Reconstruction')
+        axes[1].plot(epochs, [h['kl'] for h in history],
+                     color='#1c8b4a', linewidth=2, label='KL divergence')
+        axes[1].set_title('The two competing pressures')
+        axes[1].set_xlabel('Epoch')
+        axes[1].legend()
+
+        for ax in axes:
+            ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig
+
     @reactive.Effect
     @reactive.event(input.generate_data)
-    def _():
-        model = cvae_model.get()
-        df = data_processed.get()
-        if model is None or df is None:
-            return
-
-        n = input.n_sim()
-        tau = input.tau()
-        rho = input.rho()
-
-        # Generate confounded treatment assignment
-        U = np.random.randn(n)
-        pz = df[input.treatment_col()].mean()
-
-        # Logistic function for treatment probability
-        logit_pz = np.log(pz / (1 - pz)) if pz > 0 and pz < 1 else 0
-        ps_confounded = 1 / (1 + np.exp(-(logit_pz + rho * U)))
-        z_sim = np.random.binomial(1, ps_confounded)
-
-        # Sample covariates conditional on treatment
-        X_sim = model.sample(z_sim, n_samples=n)
-
-        # Generate outcomes
-        X_encoded, _, feature_names = encoded_features.get()
-
-        # Get numeric features
-        numeric_features = [i for i, name in enumerate(feature_names) if not any(cat in name for cat in ['_'])]
-        if len(numeric_features) > 0:
-            hX = X_sim[:, numeric_features].mean(axis=1)
-        else:
-            hX = np.zeros(n)
-
-        sdy = df[input.outcome_col()].std()
-
-        # Potential outcomes
-        y0 = hX + (0.5 * rho * U * sdy) + np.random.randn(n) * sdy
-        y1 = y0 + tau
-        y_obs = np.where(z_sim == 1, y1, y0)
-
-        # Create synthetic dataset
-        sim_df = pd.DataFrame({
-            input.outcome_col(): y_obs,
-            input.treatment_col(): z_sim,
-            'y0': y0,
-            'y1': y1,
-            'tau_true': tau
-        })
-
-        # Only include U column if rho > 0 (i.e., if U actually affects anything)
-        # When rho=0, U is generated but has zero influence, so we exclude it for clarity
-        if rho > 0:
-            sim_df['U'] = U
-
-        # Add covariates (simplified - using encoded values)
-        for i, name in enumerate(feature_names[:min(10, len(feature_names))]):
-            sim_df[f'X_{name}'] = X_sim[:, i]
-
-        sim_data.set(sim_df)
+    def generate_data():
+        old = experiment.get()
+        experiment.set(ExperimentSession(confirmed=old.confirmed, trained=old.trained, grid=old.grid))
+        try:
+            experiment.set(experiment.get().generate(n=int(input.n_sim()), tau0=float(input.tau()),
+                rho=float(input.rho()), seed=int(input.gen_seed()), heterogeneity=float(input.heterogeneity()),
+                mechanism=input.mechanism(), overlap_strength=float(input.overlap_strength())))
+        except Exception as exc:
+            report_error(exc)
 
     # Generation output
     @output
     @render.text
     def generation_output():
-        df = sim_data.get()
-        if df is None:
+        df = (experiment.get().run['result']['data'] if experiment.get().run is not None else None)
+        extras = experiment.get().run
+        if df is None or extras is None:
             return ""
-        return f"Synthetic data generated: {len(df)} observations."
+        result = extras['result']
+        ov = result['overlap']
+        tau_sd = float(np.std(result['tau_true']))
+        effect_line = ("  effect: constant at {:.3f}".format(result['true_ate'])
+                       if tau_sd == 0 else
+                       "  effect: mean {:.3f}, sd {:.3f}, range [{:.3f}, {:.3f}]".format(
+                           result['true_ate'], tau_sd,
+                           float(np.min(result['tau_true'])),
+                           float(np.max(result['tau_true']))))
+        if ov['kind'] == 'unavailable':
+            overlap_line = "  observed-covariate overlap: not available for the learned mechanism"
+        else:
+            overlap_line = (f"  assignment probability {ov['kind']}: [{ov['ps_min']:.3f}, {ov['ps_max']:.3f}]\n"
+                            f"  extreme assignment probabilities (<0.05 or >0.95): {ov['pct_extreme']:.1%}")
+        return (
+            f"Synthetic data generated: {len(df)} observations, {df.shape[1]} observed columns.\n"
+            f"  actual cohort ATE: {result['true_ate']:.3f} | baseline effect: {extras['parameters']['tau']:.3f}\n"
+            f"  all {result['decoded'].shape[1]} covariates exported; answer key is separate\n"
+            f"{effect_line}\n{overlap_line}\n  treated fraction: {ov['treated_frac']:.3f}")
+
+    # The f(X) weights, shown rather than hidden. This is the observed-confounding
+    # mechanism in full: if a covariate has weight 0 it cannot confound anything.
+    @output
+    @render.ui
+    def fx_weights():
+        state = experiment.get().trained
+        if state is None or (experiment.get().run['result']['data'] if experiment.get().run is not None else None) is None:
+            return None
+
+        table = state['index'].weights_table()
+        display = table[['covariate', 'weight']].copy()
+        display['weight'] = display['weight'].map(lambda v: "{:.4f}".format(v))
+
+        return ui.TagList(
+            ui.tags.h5("f(X): how each covariate moves the untreated outcome"),
+            ui.HTML(display.to_html(index=False, border=0,
+                                    classes="table table-sm", justify="left")),
+            ui.tags.p(
+                {"class": "text-muted", "style": "font-size: 0.9em;"},
+                ui.HTML("Covariates are standardised before weighting, so these are "
+                        "comparable across variables measured in different units. "
+                        "Equal weights is the default; the old code produced weights "
+                        "that were an accident of measurement scale.")
+            )
+        )
+
+    # The realism verdict.
+    @output
+    @render.ui
+    def realism_results():
+        extras = experiment.get().run
+        state = experiment.get().trained
+        if extras is None or state is None:
+            return None
+
+        report = extras['realism']
+        disc = report['discriminator']
+        covariates = report['covariates'].copy()
+
+        auc = disc['auc']
+        discrimination = max(auc, 1 - auc)
+        colour = "#1c8b4a" if discrimination < 0.60 else ("#fd7e14" if discrimination < 0.80 else "#dc3545")
+        worst = covariates.iloc[0]
+
+        display = covariates[['covariate', 'real_mean', 'synthetic_mean', 'smd', 'ks']].copy()
+        for col in ('real_mean', 'synthetic_mean', 'smd', 'ks'):
+            display[col] = display[col].map(lambda v: "{:.3f}".format(v))
+        display.columns = ['Covariate', 'Real (holdout)', 'Synthetic', 'SMD', 'KS']
+
+        return ui.TagList(
+            ui.row(
+                ui.column(4, ui.tags.div(
+                    {"class": "metric-card"},
+                    ui.tags.div({"class": "metric-label"}, "Discriminator AUC"),
+                    ui.tags.div({"class": "metric-value", "style": "color: {};".format(colour)},
+                                "{:.3f}".format(auc)),
+                    ui.tags.div({"class": "metric-label"}, "0.5 = chance for this diagnostic")
+                )),
+                ui.column(4, ui.tags.div(
+                    {"class": "metric-card"},
+                    ui.tags.div({"class": "metric-label"}, "Largest |SMD|"),
+                    ui.tags.div({"class": "metric-value"}, "{:.3f}".format(abs(worst['smd']))),
+                    ui.tags.div({"class": "metric-label"}, str(worst['covariate']))
+                )),
+                ui.column(4, ui.tags.div(
+                    {"class": "metric-card"},
+                    ui.tags.div({"class": "metric-label"}, "Compared against"),
+                    ui.tags.div({"class": "metric-value"}, str(disc['n_real'])),
+                    ui.tags.div({"class": "metric-label"}, "held-out rows, unseen in training")
+                ))
+            ),
+            ui.tags.div(
+                {"class": "module-ref", "style": "border-left-color: {};".format(colour)},
+                ui.HTML("<strong>Verdict:</strong> {}".format(disc['interpretation']))
+            ),
+            ui.HTML(display.to_html(index=False, border=0,
+                                    classes="table table-sm", justify="left")),
+            ui.tags.p(
+                {"class": "text-muted", "style": "font-size: 0.9em;"},
+                ui.HTML("Sorted worst-first by |SMD|. Rows near the top are where the "
+                        "generator is least faithful &mdash; and therefore where a "
+                        "conclusion drawn here is least likely to transfer to your real data.")
+            )
+        )
 
     # Analysis results
     @output
     @render.ui
     def analysis_results():
-        df = sim_data.get()
+        df = (experiment.get().run['result']['data'] if experiment.get().run is not None else None)
         if df is None:
             return None
 
-        true_ate = df['tau_true'].iloc[0]
-        y_col = input.outcome_col()
-        z_col = input.treatment_col()
-
-        naive_ate = df[df[z_col] == 1][y_col].mean() - df[df[z_col] == 0][y_col].mean()
-        bias = naive_ate - true_ate
+        summary = analysis_summary(experiment.get().run)
+        true_ate, naive_ate, bias = summary['true_ate'], summary['naive'], summary['error']
 
         return ui.TagList(
             ui.h4("Analysis Results"),
@@ -749,7 +1083,7 @@ def server(input, output, session):
                 )),
                 ui.column(4, ui.tags.div(
                     {"class": "metric-card"},
-                    ui.tags.div({"class": "metric-label"}, "Bias"),
+                    ui.tags.div({"class": "metric-label"}, "Estimation error"),
                     ui.tags.div({"class": "metric-value", "style": "color: #dc3545;"}, f"{bias:.2f}")
                 ))
             )
@@ -759,19 +1093,20 @@ def server(input, output, session):
     @output
     @render.plot
     def outcome_plot():
-        df = sim_data.get()
+        df = (experiment.get().run['result']['data'] if experiment.get().run is not None else None)
         if df is None:
             return None
 
-        y_col = input.outcome_col()
-        z_col = input.treatment_col()
+        y_col = experiment.get().run['outcome_col']
+        z_col = experiment.get().run['treatment_col']
 
         fig, ax = plt.subplots(figsize=(10, 5))
 
         # Plot density for each treatment group with instats colors
         for z_val, color, label in [(0, '#6c757d', 'Control'), (1, '#4A9EFF', 'Treated')]:
             df_sub = df[df[z_col] == z_val][y_col]
-            df_sub.plot.density(ax=ax, color=color, alpha=0.7, label=label, linewidth=2)
+            if len(df_sub) > 1 and df_sub.std() > 0:
+                df_sub.plot.density(ax=ax, color=color, alpha=0.7, label=label, linewidth=2)
 
         ax.set_xlabel('Outcome (Y)')
         ax.set_ylabel('Density')
@@ -781,12 +1116,92 @@ def server(input, output, session):
 
         return fig
 
+    @reactive.Effect
+    @reactive.event(input.run_grid)
+    def run_grid():
+        try:
+            experiment.set(experiment.get().run_grid(tau0=float(input.tau()),
+                                                     n=int(input.grid_n()), seed=int(input.grid_seed())))
+        except Exception as exc:
+            report_error(exc)
+
+    @output
+    @render.text
+    def grid_status():
+        grid = experiment.get().grid
+        if grid is None:
+            return ""
+        return "{} cells generated with common random draws for covariates and outcome noise. Estimates use one cohort per cell.".format(
+            len(grid))
+
+    @output
+    @render.ui
+    def grid_results():
+        grid = experiment.get().grid
+        if grid is None:
+            return None
+
+        display = grid[['overlap', 'heterogeneity', 'hidden_bias', 'true_ate',
+                        'naive_error', 'gcomp_error', 'pct_extreme', 'cate_corr']].copy()
+        display['pct_extreme'] = display['pct_extreme'].map(lambda v: "{:.1%}".format(v))
+        display['cate_corr'] = display['cate_corr'].map(
+            lambda v: "--" if pd.isna(v) else "{:.3f}".format(v))
+        for col in ('true_ate', 'naive_error', 'gcomp_error'):
+            display[col] = display[col].map(lambda v: "{:+.3f}".format(v))
+        display.columns = ['Overlap', 'Effect', 'Hidden bias', 'True ATE',
+                           'Naive error', 'g-comp error', '% extreme', 'CATE r']
+
+        # Every sentence below is computed from the table, so the prose can never
+        # contradict the numbers it sits beside -- the same discipline the
+        # survcausal-pilot vignette applies to its own narrative.
+        lines = summarize_grid(grid)
+
+        return ui.TagList(
+            ui.HTML(display.to_html(index=False, border=0,
+                                    classes="table table-sm", justify="left")),
+            ui.tags.div(
+                {"class": "module-ref"},
+                ui.tags.ul(*[ui.tags.li(line) for line in lines])
+            ),
+            ui.tags.p(
+                {"class": "text-muted", "style": "font-size: 0.9em;"},
+                ui.HTML("<strong>CATE r</strong> is the correlation between the estimated "
+                        "and true per-patient effect &mdash; undefined when the effect is "
+                        "constant. Average-effect comparisons remain meaningful in that case.")
+            )
+        )
+
+    @output
+    @render.ui
+    def download_controls():
+        if experiment.get().run is None:
+            return None
+        return ui.TagList(ui.download_button("download_data", "Download Observed Data (.csv)", class_="btn-success"),
+                          ui.download_button("download_answers", "Download Data + Answer Key (.zip)", class_="btn-secondary"))
+
+    @output
+    @render.ui
+    def grid_download_controls():
+        if experiment.get().grid is None:
+            return None
+        return ui.download_button("download_grid", "Download Grid (.csv)", class_="btn-success")
+
+    @session.download(
+        filename=lambda: f"credence_scenario_grid_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    )
+    def download_grid():
+        grid = experiment.get().grid
+        if grid is None:
+            yield ""
+            return
+        yield grid.to_csv(index=False)
+
     # Download handler
     @session.download(
         filename=lambda: f"credence_instats_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
     )
     def download_data():
-        df = sim_data.get()
+        df = (experiment.get().run['result']['data'] if experiment.get().run is not None else None)
         if df is None:
             yield ""
             return
@@ -795,6 +1210,12 @@ def server(input, output, session):
         csv_string = df.to_csv(index=False)
         yield csv_string
 
+
+    @session.download(filename=lambda: "credence_data_and_answers.zip", media_type="application/zip")
+    def download_answers():
+        run = experiment.get().run
+        if run is not None:
+            yield answer_bundle(run)
 
 # Create app
 app = App(app_ui, server)
