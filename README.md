@@ -65,12 +65,56 @@ See the [tutorial PDF](tutorial/tutorial.pdf) for a comprehensive walkthrough of
 
 ## Workflow
 
-The app follows a five-step process:
+The app opens in **Guided lessons**, with an **Advanced workspace** for uploads and
+custom experiments. Guided and advanced state are independent: changing an upload,
+model setting, or simulation control cannot change a completed guided lesson.
+
+### Guided lessons: predict, compare, explain
+
+The worked example asks whether a fictional training program improves the average
+change in a performance score. Outcomes are continuous score points; higher is
+better. The source cohort is simulated too, so this example teaches the workflow
+without making empirical claims about a real program.
+
+| Lesson | Assignment mechanism | Teaching question |
+|--------|----------------------|-------------------|
+| Randomized assignment | λ = 0, ρ = 0 | Can a fair comparison still miss the true effect? |
+| Measured confounding | λ = 1.25, ρ = 0 | Does adjustment help when groups differ in measured characteristics? |
+| Hidden confounding | λ = 1.25, ρ = 1 | Can adjustment remove a common cause that was not measured? |
+
+Choose a prediction, including “I'm not sure yet,” and run the experiment. The
+first run trains the source-cohort generator; subsequent lessons reuse it. Compare
+unadjusted and g-computation estimates, reveal the true cohort effect, and write an
+explanation. The adjusted linear model includes treatment interactions and matches
+the chosen outcome mechanism; it is a teaching reference, not a general-purpose
+analysis recommendation. Plots show point estimates without confidence intervals.
+
+The lessons share the measured covariates, 2,000-row sample size, effect, and
+outcome-noise draws. Their effect is constant at +5 score points. Different
+assignment rules change who receives the program; hidden confounding also changes
+potential outcomes through U. These are single-cohort errors, not Monte Carlo bias.
+
+Predictions, reflections, reveal choices, and completed results remain available
+when moving between lessons in the same session. Refreshing the app starts a new
+session. Download the experiment record to preserve a prediction and reflection;
+it excludes truth, errors, and the effect parameter until truth is revealed. The
+observed CSV always excludes oracle columns. The answer ZIP becomes available
+after reveal. The reveal control supports a teaching exercise, not access control:
+the source code and instructor documentation contain the truth.
+
+The generator's held-out diagnostic is under “What is learned, what is chosen,
+and what counts as evidence?” A good covariate match does not validate the chosen
+causal mechanism. Repeated simulations and additional estimator families are
+outside these first three lessons.
+
+### Advanced workspace
+
+The original controls remain available in separate navigation tabs:
 
 1. **Load Data**: Upload your CSV or use built-in examples (LaLonde NSW, Pneumonia Vaccine)
 2. **Learn Structure**: Train a Conditional VAE to model p(X|Z), holding out a slice for step 4
 3. **Generate Data**: Choose a baseline effect, heterogeneity and unmeasured confounding; inspect the actual cohort ATE
-4. **Analyze & Export**: Check held-out realism and estimation error; download observed data and a separate answer key
+4. **Compare & Export**: Compare unadjusted, adjusted, and true effects; check held-out realism; download observed data and a separate answer key
 5. **Compare Scenarios**: Run a paired 12-cell grid with common covariate and noise draws
 
 ## Key Parameters
@@ -128,6 +172,7 @@ by the companion R study [`survcausal-pilot`](https://github.com/ishuryak/survca
 python3 tests/test_tier0.py    # generator correctness and realism
 python3 tests/test_tier1.py    # tau(X), the overlap dial, the factorial grid
 python3 tests/test_correctness.py  # schema, treatment semantics, state and export regressions
+python3 tests/test_lessons.py  # paired guided experiments, estimator comparison and truth reveal
 ```
 
 Runs the full pipeline headlessly on both built-in datasets and checks, among other

@@ -1,0 +1,66 @@
+:root { --lab-ink: #1f3346; --lab-teal: #087f79; --lab-blue: #2855a6; --lab-muted: #586878; }
+body { background: #f7f9fb; color: var(--lab-ink); line-height: 1.55; }
+.container-fluid { max-width: 1180px; padding: 24px 30px; }
+.lab-header { padding: 12px 0 22px; }
+.lab-header h1 { font-size: clamp(1.8rem, 3vw, 2.55rem); font-weight: 700; letter-spacing: -.035em; margin: 4px 0 8px; }
+.lab-header > p:last-child { color: var(--lab-muted); margin: 0; }
+.eyebrow, .step-kicker { font-size: .72rem; font-weight: 700; letter-spacing: .11em; color: var(--lab-teal); }
+.nav-tabs { gap: 12px; border-color: #dce3eb; }
+.nav-tabs .nav-link { padding: 12px 16px; border: 0; color: var(--lab-muted); font-weight: 600; }
+.nav-tabs .nav-link.active { color: var(--lab-blue); background: transparent; border-bottom: 3px solid var(--lab-blue); }
+.nav-tabs .nav-link:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid #82b1ff; outline-offset: 3px; }
+.guided-layout { display: grid; grid-template-columns: 255px minmax(0, 1fr); gap: 36px; padding-top: 30px; }
+.lesson-sidebar .shiny-input-container { width: 100%; }
+.lesson-sidebar .control-label { margin-bottom: 12px; font-size: .84rem; font-weight: 600; }
+.lesson-sidebar .radio { background: white; border: 1px solid #dce3eb; border-radius: 9px; margin: 0 0 10px; padding: 12px 12px 12px 14px; }
+.lesson-sidebar .radio:has(input:checked) { border-color: var(--lab-blue); background: #eef3fc; box-shadow: inset 3px 0 var(--lab-blue); }
+.lesson-sidebar .radio:focus-within { outline: 2px solid #82b1ff; }
+.lesson-sidebar .radio label { font-weight: 600; font-size: .88rem; display: flex; gap: 8px; align-items: baseline; padding-left: 0; cursor: pointer; }
+.lesson-sidebar .radio input { position: static; margin: 0; accent-color: var(--lab-blue); flex-shrink: 0; }
+.progress-note { font-size: .8rem; color: var(--lab-teal); padding-bottom: 14px; border-bottom: 1px solid #dce3eb; }
+.study-card { padding: 16px 0; }
+.study-card h3 { font-size: 1.1rem; font-weight: 650; }
+.study-card p, .study-card dl { font-size: .85rem; }
+.study-card dt { font-size: .78rem; margin-top: 14px; color: var(--lab-muted); }
+.study-card dd { margin: 2px 0 0; }
+.lesson-intro h2 { font-size: clamp(1.4rem, 2.5vw, 1.9rem); font-weight: 650; letter-spacing: -.025em; }
+.lesson-change { color: var(--lab-muted); max-width: 680px; }
+.prediction-box { margin-top: 24px; padding: 18px 20px 10px; border: 1px solid #dce3eb; background: #fff; border-radius: 10px; }
+.prediction-box .control-label { display: block; padding-top: 7px; font-weight: 600; }
+.run-row { display: flex; align-items: center; gap: 16px; margin: 16px 0 12px; }
+.run-row .btn-primary { width: auto; flex-shrink: 0; margin: 0; background: var(--lab-blue); padding: 11px 20px; }
+.run-row p { margin: 0; }
+.muted { color: var(--lab-muted); }
+.small { font-size: .8rem; }
+.status-note { padding: 12px 16px; border-radius: 8px; background: #edf6f4; color: #1e5652; font-size: .86rem; margin: 10px 0; }
+.error-note { background: #fff2e7; color: #803f10; }
+.compare-card, .explain-card { background: #fff; border: 1px solid #dce3eb; border-radius: 12px; padding: 22px; margin-top: 22px; }
+.section-heading h3, .explain-card h3 { font-size: 1.25rem; font-weight: 650; margin: 6px 0 15px; }
+.truth-note { color: var(--lab-blue); font-weight: 600; }
+.empty-state { color: var(--lab-muted); padding: 22px 16px; border: 1px dashed #cbd5e1; border-radius: 8px; margin: 10px 0 18px; }
+.compare-card:has(.empty-state) .shiny-plot-output { display: none; }
+.compare-card:has(.empty-state) .shiny-input-container { display: none; }
+.estimate-table { font-size: .88rem; }
+.estimate-table th { color: var(--lab-muted); font-weight: 600; }
+.download-row { display: flex; flex-wrap: wrap; gap: 9px; margin: 14px 0 20px; }
+.download-row .btn { font-size: .82rem; }
+.ingredient-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; padding-top: 16px; }
+.ingredient-grid h4 { font-size: .94rem; font-weight: 700; }
+.ingredient-grid p { font-size: .84rem; color: var(--lab-muted); }
+.lab-footer { padding: 28px 0 8px; margin-top: 25px; color: var(--lab-muted); font-size: .76rem; border-top: 1px solid #dce3eb; }
+#advanced_step { margin-top: 18px; gap: 0; font-size: .84rem; }
+.step-panel { margin-top: 22px; background: #fff; }
+.step-panel h3 { font-size: 1.4rem; }
+.table { overflow-wrap: anywhere; }
+@media (max-width: 800px) {
+  .container-fluid { padding: 18px 16px; }
+  .guided-layout { grid-template-columns: 1fr; gap: 18px; padding-top: 20px; }
+  .study-card { border-top: 1px solid #dce3eb; }
+  .study-card dl { display: grid; grid-template-columns: 95px minmax(0, 1fr); gap: 8px; }
+  .study-card dt, .study-card dd { margin: 0; }
+  .lesson-sidebar .radio { padding: 10px 12px; }
+  .run-row { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .ingredient-grid { grid-template-columns: 1fr; gap: 5px; }
+  .compare-card, .explain-card { padding: 16px; }
+  .nav-tabs { gap: 0; }
+}
