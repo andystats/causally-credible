@@ -84,7 +84,7 @@ def load_pneumonia():
         'priorPneumonia': prior_pneumonia,
         'priorVaccine': prior_vaccine,
     })
-    return df, "Loaded the Module 4 pneumonia teaching cohort ({} rows).".format(n)
+    return df, "Loaded a simulated pneumonia teaching cohort ({} rows); not clinical evidence.".format(n)
 
 
 LOADERS = {

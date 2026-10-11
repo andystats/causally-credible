@@ -1,27 +1,11 @@
-"""
-Credence Tutorial - instats SSC 2026 Workshop
-Module 5: Validating Causal Methods with Semi-Synthetic Data
-
-A Python Shiny app for generating semi-synthetic data with known causal
-effects via a Conditional VAE, and guiding the user on how to analyze
-the data to recover the true effect.
-
-Based on Parikh et al. (2022) "Validating Causal Inference Methods" (ICML).
-"""
+"""Tao of RWD: custom experiments based on the Credence framework."""
 
 from shiny import ui, render, reactive
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from pathlib import Path
 
-# The app is deliberately thin. The three things worth understanding live in
-# their own modules so they can be read -- and tested -- without Shiny in the way:
-#   cvae_model.py  learns p(X | Z)                       (realism)
-#   dgp.py         chooses tau, rho and f(X)             (truth)
-#   realism.py     measures whether the realism is real  (evidence)
-# tests/test_tier0.py runs all three headlessly.
 from examples import load_example
 from scenarios import summarize_grid
 from workflow import ExperimentSession, treatment_levels, answer_bundle
@@ -31,7 +15,7 @@ from comparison import compare_estimates, comparison_plot
 sns.set_style("whitegrid")
 plt.rcParams['font.family'] = 'sans-serif'
 
-# Custom CSS with instats branding and MathJax support
+# Shared styles and MathJax
 custom_css = """
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -52,10 +36,9 @@ custom_css = """
 
 <style>
     :root {
-        --instats-blue: #4A9EFF;
-        --instats-accent: #4A9EFF;
-        --instats-orange: #fd7e14;
-        --instats-green: #1c8b4a;
+        --lab-blue: #2855a6;
+        --lab-orange: #b85c26;
+        --lab-green: #087f79;
         --cc-muted: #6c757d;
         --cc-border: #e5e5ea;
         --cc-bg: #ffffff;
@@ -77,35 +60,6 @@ custom_css = """
         scroll-margin: 0;
     }
     .container-fluid { max-width: 980px; }
-    .instats-header {
-        background: linear-gradient(135deg, var(--instats-blue), #3a7fcf);
-        color: white;
-        padding: 20px 25px;
-        border-radius: 12px;
-        margin-bottom: 20px;
-    }
-    .app-title {
-        font-size: 1.8em;
-        font-weight: 700;
-        letter-spacing: -0.02em;
-        margin-bottom: 0.2em;
-        color: white;
-    }
-    .app-subtitle {
-        color: rgba(255,255,255,0.9);
-        margin-bottom: 0;
-        font-size: 1em;
-    }
-    .workshop-badge {
-        background: rgba(255,255,255,0.2);
-        color: white;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 0.85em;
-        font-weight: 600;
-        display: inline-block;
-        margin-bottom: 10px;
-    }
     .cc-card {
         background: var(--cc-bg);
         border: 1px solid var(--cc-border);
@@ -123,10 +77,10 @@ custom_css = """
         border-left: 4px solid #dee2e6;
     }
     .step-active {
-        border-left-color: var(--instats-orange);
+        border-left-color: var(--lab-orange);
     }
     .step-complete {
-        border-left-color: var(--instats-green);
+        border-left-color: var(--lab-green);
     }
     .metric-card {
         background: #f8f9fa;
@@ -167,7 +121,7 @@ custom_css = """
         border-radius: 4px;
     }
     .btn-primary {
-        background-color: var(--instats-blue);
+        background-color: var(--lab-blue);
         border: none;
         width: 100%;
         margin-top: 10px;
@@ -176,14 +130,14 @@ custom_css = """
         background-color: #3a7fcf;
     }
     .btn-success {
-        background-color: var(--instats-green);
+        background-color: var(--lab-green);
         border: none;
         width: 100%;
         margin-top: 10px;
     }
-    .module-ref {
+    .teaching-note {
         background: #e8f4ff;
-        border-left: 3px solid var(--instats-blue);
+        border-left: 3px solid var(--lab-blue);
         padding: 10px 15px;
         margin: 10px 0;
         border-radius: 0 8px 8px 0;
@@ -199,24 +153,11 @@ advanced_ui = ui.navset_tab(
         ui.p(ui.HTML("Upload a CSV to anchor the covariate structure \\((X)\\) and treatment \\((Z)\\). This provides realistic dependence patterns for the generator.")),
 
         ui.tags.details(
-            ui.tags.summary("What and why"),
-            ui.p(
-                "You select an outcome ", ui.tags.code("Y"), " and a binary treatment ", ui.tags.code("Z"),
-                ". All other variables are treated as covariates ", ui.tags.code("X"), "."
-            ),
-            ui.p(
-                "We learn ", ui.tags.code("p(X|Z)"), " to anchor realistic covariate distributions conditional on ",
-                ui.tags.code("Z"), ". This captures observed differences in ", ui.tags.code("X"),
-                " between treated and control groups (the observed confounding structure). We do not fit an outcome model here; outcomes are simulated later via ",
-                ui.tags.code("f(X)"), ", ", ui.tags.code("τ"), ", and ", ui.tags.code("U"), "."
-            ),
-            ui.p(
-                ui.strong("Expectations:"), " ", ui.tags.code("Z"), " must be binary; we perform complete-case analysis (rows with missing values are dropped) for simplicity; ",
-                ui.tags.code("Y"), " is treated as numeric; factors are supported in ", ui.tags.code("X"), "."
-            ),
-            ui.p(
-                ui.strong("Note:"), " The baseline effect is constant when heterogeneity is zero. Otherwise the effect varies with covariates, and the actual cohort ATE is reported after generation."
-            )
+            ui.tags.summary("Data requirements"),
+            ui.p("Choose a numeric outcome and a binary treatment. Remaining columns are covariates; "
+                 "numeric and categorical values are supported. Rows with missing values are dropped."),
+            ui.p("The generator learns covariates conditional on treatment, p(X|Z). "
+                 "The outcome mechanism is chosen in step 3, not fitted to the source outcomes."),
         ),
 
         ui.row(
@@ -227,7 +168,7 @@ advanced_ui = ui.navset_tab(
             ui.column(
                 4,
                 ui.input_select("example_dataset", "Or load example:",
-                              choices={"": "None", "lalonde": "LaLonde NSW", "pneumonia": "Pneumonia Vaccine (M4)"}),
+                              choices={"": "None", "lalonde": "LaLonde NSW", "pneumonia": "Pneumonia vaccine (simulated)"}),
                 ui.input_action_button("load_example", "Load Example", class_="btn-secondary")
             )
         ),
@@ -243,31 +184,10 @@ advanced_ui = ui.navset_tab(
         ui.p(ui.HTML("Train a Conditional VAE to learn \\((p(X\\mid Z))\\), capturing how covariates shift across treatment groups (observed confounding).")),
 
         ui.tags.details(
-            ui.tags.summary("Under the hood"),
-            ui.p(ui.HTML("We fit an encoder \\((q_\\phi(u \\mid x,z))\\) and decoder \\((p_\\theta(x \\mid u,z))\\). Training maximizes the ELBO (reconstruction + regularization). This lets us later sample new \\((X)\\) consistent with a chosen \\((Z)\\).")),
-            ui.p("Interpretation: If treated and control have different covariate patterns, the model learns those differences, so generated data inherit realistic observed bias.")
-        ),
-
-        ui.tags.details(
-            ui.tags.summary("Why the batch size matters (and a bug this app used to have)"),
-            ui.tags.div(
-                {"class": "math-note"},
-                ui.p(ui.HTML(
-                    "Training takes <strong>one gradient step per batch</strong>. With "
-                    "<code>batch size = full dataset</code>, an epoch is a single step, so "
-                    "50 epochs means 50 steps in total &mdash; nowhere near convergence. "
-                    "That is what this app did until now, while telling you the output was "
-                    "&ldquo;near-indistinguishable&rdquo; from your data.")),
-                ui.p(ui.HTML(
-                    "Set the batch size to the full dataset and train for a few epochs to "
-                    "<em>reproduce the old behaviour</em>, then compare the realism score in "
-                    "Step 4. The failure mode is more convincing when you can see it.")),
-                ui.p(ui.HTML(
-                    "The <strong>holdout</strong> is set aside before training and never shown "
-                    "to the model. Step 4 compares synthetic data against those unseen rows, "
-                    "because a flexible generator scored against its own training data can win "
-                    "by memorising &mdash; which is both a meaningless result and a privacy risk."))
-            )
+            ui.tags.summary("Training and holdout"),
+            ui.p("Each batch produces one gradient update. Smaller batches give more updates per epoch; "
+                 "a full-data batch gives one. Check the loss curve and held-out diagnostics before relying on the generator."),
+            ui.p("Holdout rows are excluded from training and used to check covariate fidelity in step 4."),
         ),
 
         ui.row(
@@ -275,7 +195,7 @@ advanced_ui = ui.navset_tab(
                                          min=1, max=400, value=150, step=1)),
             ui.column(3, ui.input_select("batch_size", "Batch Size",
                                          choices={"32": "32", "64": "64", "128": "128",
-                                                  "256": "256", "0": "Full dataset (the old bug)"},
+                                                  "256": "256", "0": "Full dataset"},
                                          selected="128")),
             ui.column(3, ui.input_slider("holdout_frac", "Holdout Fraction",
                                          min=0.1, max=0.5, value=0.25, step=0.05)),
@@ -299,27 +219,10 @@ advanced_ui = ui.navset_tab(
         ),
 
         ui.tags.details(
-            ui.tags.summary("What f(X) is, and why it is now spelled out"),
-            ui.tags.div(
-                {"class": "math-note"},
-                ui.p(ui.HTML(
-                    "\\(f(X)\\) is the <strong>prognostic index</strong>: how the observed "
-                    "covariates move the untreated outcome \\(Y(0)\\). It is the entire "
-                    "outcome component of observed confounding, so it should be a stated modelling "
-                    "choice rather than an accident.")),
-                ui.p(ui.HTML(
-                    "It previously was an accident. \\(f(X)\\) was an unweighted mean of the "
-                    "covariates <em>on their raw scale</em>, restricted to columns whose name "
-                    "contained no underscore. So earnings in dollars drowned out age in years, "
-                    "and any covariate you happened to name <code>prior_vaccine</code> was "
-                    "silently dropped &mdash; exported to you as a confounder while influencing "
-                    "nothing.")),
-                ui.p(ui.HTML(
-                    "Now every covariate is standardised first, then combined with "
-                    "<strong>weights shown in the table below</strong>. Equal weights is the "
-                    "default. The weights remain fixed; "
-                    "effect variation is controlled separately below."))
-            )
+            ui.tags.summary("Baseline outcome: f(X)"),
+            ui.p("The prognostic index combines standardized covariates with equal weights to set "
+                 "the untreated outcome. The weights are shown below after generation. "
+                 "Effect heterogeneity is controlled separately."),
         ),
 
         ui.row(
@@ -340,7 +243,7 @@ advanced_ui = ui.navset_tab(
         ),
 
         ui.tags.details(
-            ui.tags.summary("Overlap: the positivity dial, and the trade it forces"),
+            ui.tags.summary("Treatment assignment and overlap"),
             ui.tags.div(
                 {"class": "math-note"},
                 ui.p(ui.HTML(
@@ -373,14 +276,12 @@ advanced_ui = ui.navset_tab(
         ),
         ui.tags.p(
             {"class": "text-muted", "style": "font-size: 0.9em; margin-top: -10px;"},
-            ui.HTML("Baseline effect typical range: -10 to 10. ρ ranges: 0.0 (none) to 0.6+ (strong). <br><strong>Note:</strong> The generated hidden confounder and counterfactual outcomes are in the separate answer key, not the observed-data download.")
+            ui.HTML("The hidden confounder and potential outcomes are available only in the separate answer key.")
         ),
         ui.tags.p(
             {"class": "text-muted", "style": "font-size: 0.9em;"},
-            ui.HTML("The <strong>generation seed</strong> is separate from the training seed on "
-                    "purpose: it lets you redraw a cohort without retraining the model, or "
-                    "retrain without moving the cohort, so you always know which change caused "
-                    "what you are looking at. Same seed, same data &mdash; every time.")
+            "Change the generation seed to redraw a cohort without retraining. "
+            "Reproducibility requires the same model, settings, code, and runtime."
         ),
         ui.input_action_button("generate_data", "Generate Synthetic Data", class_="btn-primary"),
         ui.output_text_verbatim("generation_output"),
@@ -388,11 +289,11 @@ advanced_ui = ui.navset_tab(
     )),
     ui.nav_panel('4 · Compare & export', ui.tags.div(
         {"class": "step-panel", "id": "step4"},
-        ui.h3("Step 4: Analyze & Export"),
-        ui.p("Inspect how naive comparisons depart from the truth, and reflect on what is needed to recover the causal contrast."),
+        ui.h3("Step 4: Compare & Export"),
+        ui.p("Compare unadjusted and adjusted estimates with the true cohort effect."),
 
         ui.tags.details(
-            ui.tags.summary("Why naive is biased"),
+            ui.tags.summary("Why estimates differ from truth"),
             ui.tags.div(
                 {"class": "math-note"},
                 ui.p("The observed treated-minus-control contrast can differ from the cohort-average effect because the treatment groups have different baseline outcomes and, with heterogeneity, different effects. One run shows estimation error; repeated runs are needed to measure bias."),
@@ -403,127 +304,38 @@ advanced_ui = ui.navset_tab(
         ui.output_plot("comparison_plot_output", height="280px"),
         ui.output_plot("outcome_plot"),
 
+        ui.p("The CSV contains observed data only. The answer bundle adds ground truth, aligned by row order. "
+             "Keep answer-key columns out of estimator inputs."),
+        ui.output_ui("download_controls"),
         ui.tags.hr(),
-        ui.h4("Is the synthetic data actually realistic?"),
-        ui.p(ui.HTML(
-            "Everything above rests on a claim: that these synthetic covariates resemble "
-            "your real ones. That claim used to be asserted and never checked. Here it is "
-            "measured, against the <strong>holdout rows the model never saw</strong>.")),
-
+        ui.h4("Check covariate fidelity"),
+        ui.p("Compare generated covariates with held-out source rows."),
         ui.tags.details(
-            ui.tags.summary("How to read these three numbers"),
-            ui.tags.div(
-                {"class": "math-note"},
-                ui.tags.ol(
-                    ui.tags.li(ui.HTML(
-                        "<strong>SMD</strong> &mdash; difference in means, in pooled standard "
-                        "deviations. Below 0.1 is the usual threshold for negligible.")),
-                    ui.tags.li(ui.HTML(
-                        "<strong>KS distance</strong> &mdash; the largest gap between the two "
-                        "cumulative distributions. Catches differences in spread and shape that "
-                        "a difference in means cannot.")),
-                    ui.tags.li(ui.HTML(
-                        "<strong>Discriminator AUC</strong> &mdash; a random forest is asked to "
-                        "tell real rows from synthetic ones, cross-validated so it cannot cheat "
-                        "by memorising. AUC near 0.5 means this diagnostic did not clearly "
-                        "separate the samples; it does not prove equivalent distributions."))
-                ),
-                ui.p(ui.HTML(
-                    "Why all three: a generator can match every mean (SMD &asymp; 0) and still "
-                    "get the shapes wrong (KS large). It can match every individual "
-                    "distribution and still destroy the <em>correlations between</em> "
-                    "covariates &mdash; and only the discriminator, which sees whole rows at "
-                    "once, will catch that.")),
-                ui.p(ui.HTML(
-                    "<strong>Try this:</strong> go back to Step 2, set the batch size to "
-                    "&ldquo;Full dataset&rdquo; with 5 epochs, retrain, and regenerate. Watch "
-                    "the AUC climb toward 1.0. That is what the old version of this app was "
-                    "shipping."))
-            )
+            ui.tags.summary("Read the diagnostics"),
+            ui.tags.ul(
+                ui.tags.li(ui.strong("SMD: "), "Difference in means, in pooled standard deviations."),
+                ui.tags.li(ui.strong("KS distance: "), "Largest gap between cumulative distributions; detects differences in spread and shape."),
+                ui.tags.li(ui.strong("Discriminator AUC: "), "A cross-validated random forest distinguishes whole source and synthetic rows. "
+                           "AUC near 0.5 does not prove equivalent distributions or a valid causal mechanism."),
+            ),
+            ui.p("Check all three: similar means can hide different shapes and dependencies."),
         ),
         ui.output_ui("realism_results"),
-
-        ui.tags.hr(),
-        ui.h4("Next Steps: Apply Methods from Module 4"),
-        ui.p(
-            "You now have a benchmark with known truth. Use the methods from Module 4 to analyze this data:"
-        ),
-
-        ui.tags.div(
-            {"class": "module-ref"},
-            ui.tags.ol(
-                ui.tags.li(ui.HTML("<strong>G-computation:</strong> Fit <code>Q(A,W) = E[Y|A,W]</code> with Super Learner, then average over the population.")),
-                ui.tags.li(ui.HTML("<strong>TMLE:</strong> Apply the targeting step to optimize for the ATE. Use the <code>tmle</code> R package as shown in Module 4.")),
-                ui.tags.li(ui.HTML("<strong>DML/AIPW:</strong> Use cross-fitting with <code>DoubleML</code> for doubly-robust estimation.")),
-            ),
-            ui.p(ui.HTML("<strong>Try it:</strong> Download the data below and compare how each method performs against the known truth, especially as you vary ρ!"))
-        ),
-
-        ui.tags.details(
-            ui.tags.summary("Full Causal Roadmap (from Module 2)"),
-            ui.tags.ol(
-                ui.tags.li(ui.HTML("<strong>Specify the question.</strong> Define target population, exposure(s), outcome(s), time, and contrast (ATE/ATT/ATC).")),
-                ui.tags.li(ui.HTML("<strong>Specify a causal model.</strong> Draw a DAG; consider unmeasured and time-varying confounding; missingness/censoring.")),
-                ui.tags.li(ui.HTML("<strong>Define the causal parameter.</strong> Use counterfactuals (Y(0), Y(1)) to formalize the estimand (e.g., τ = E[Y(1) − Y(0)]).")),
-                ui.tags.li(ui.HTML("<strong>Describe the observed data/statistical model.</strong> What did we actually measure? Favor flexible functional forms.")),
-                ui.tags.li(ui.HTML("<strong>Assess identifiability.</strong> State and evaluate assumptions (consistency, conditional exchangeability, positivity). Consider alternative designs (DiD, IV, front-door) when appropriate.")),
-                ui.tags.li(ui.HTML("<strong>Define the statistical parameter.</strong> Map the causal estimand to a function of the observed data distribution.")),
-                ui.tags.li(ui.HTML("<strong>Choose and implement an estimator.</strong> Prefer robust learners (e.g., Super Learner + TMLE/DML) with cross-fitting; check overlap; obtain valid CIs.")),
-                ui.tags.li(ui.HTML("<strong>Conduct sensitivity analyses.</strong> Quantify residual confounding (Rosenbaum bounds, VanderWeele formulas, E-values), use negative controls, and report tipping points.")),
-                ui.tags.li(ui.HTML("<strong>Interpret.</strong> State whether results are causal or associational; articulate assumptions and limitations; discuss transportability."))
-            ),
-            ui.p(ui.HTML("<em>See: Dang & Balzer (2023). Start with the Target Trial Protocol, Then Follow the Roadmap for Causal Inference. Epidemiology.</em>"))
-        ),
-
-        ui.tags.hr(),
-        ui.h4("Citations & Acknowledgments"),
-        ui.tags.p(
-            ui.HTML("<strong>Credence Framework:</strong> Parikh, H., Vajao, C., Xu, L., Tchetgen Tchetgen, E. (2022). <em>Validating Causal Inference Methods</em>. Proceedings of the 39th International Conference on Machine Learning (PMLR 162). "),
-            ui.tags.a("arXiv PDF", href="https://arxiv.org/pdf/2202.04208", target="_blank")
-        ),
-        ui.tags.p(
-            ui.HTML("<strong>Workshop Materials:</strong> This app is part of the instats SSC 2026 Accreditation Workshop on Modern Analysis of Real-World Data Following the Causal Roadmap & Applications of Causal AI.")
-        ),
-
-        ui.p("The CSV contains observed data only. The separate answer bundle includes ground truth; "
-             "keep its answer-key columns out of learner features. Rows align by CSV row order."),
-        ui.output_ui("download_controls"),
     )),
     ui.nav_panel('5 · Scenario grid', ui.tags.div(
         {"class": "step-panel", "id": "step5"},
         ui.h3("Step 5: Factorial Scenario Grid"),
-        ui.p(ui.HTML(
-            "One dramatic scenario can show an estimator failing. It cannot show "
-            "<em>why</em>, because several things are wrong at once. So we cross the three "
-            "axes Step 3 made independent and move one at a time.")),
-
+        ui.p("Compare 12 combinations of overlap, effect heterogeneity, and hidden confounding, "
+             "using common random draws."),
         ui.tags.details(
-            ui.tags.summary("The design, and where it comes from"),
-            ui.tags.div(
-                {"class": "math-note"},
-                ui.p(ui.HTML(
-                    "This borrows the design of the companion R study, "
-                    "<code>survcausal-pilot</code>, whose headline result is a 2&times;2 "
-                    "factorial crossing confounding shape with hazard shape at a single fixed "
-                    "effect size &mdash; so that any difference between cells is attributable "
-                    "to <strong>one</strong> cause. Its README puts it plainly: the alternative "
-                    "&ldquo;would change several things at once and make the cause "
-                    "ambiguous.&rdquo;")),
-                ui.tags.ul(
-                    ui.tags.li(ui.HTML("<strong>overlap (λ)</strong> &mdash; how steeply "
-                                       "treatment depends on covariates")),
-                    ui.tags.li(ui.HTML("<strong>heterogeneity (κ)</strong> &mdash; how much "
-                                       "the effect varies across patients")),
-                    ui.tags.li(ui.HTML("<strong>hidden bias (ρ)</strong> &mdash; how strongly "
-                                       "an unmeasured confounder acts"))
-                ),
-                ui.p(ui.HTML(
-                    "Watch the <strong>% extreme</strong> column. That is the positivity "
-                    "diagnostic the R pilot already computes and never varies &mdash; across "
-                    "all four of its design cells it reads 0.00000, 0.00000, 0.00036, 0.00047. "
-                    "A diagnostic that never moves teaches nothing. Here it moves, and you can "
-                    "inspect estimation error. Repeated runs are needed to measure bias."))
-            )
+            ui.tags.summary("Read the grid"),
+            ui.tags.ul(
+                ui.tags.li("Overlap (λ): how strongly measured covariates affect assignment."),
+                ui.tags.li("Heterogeneity (κ): how much the effect varies across people."),
+                ui.tags.li("Hidden confounding (ρ): how strongly an unmeasured cause affects assignment and outcomes."),
+            ),
+            ui.p("Compare cells that differ in one setting. The % extreme column flags assignment "
+                 "probabilities near 0 or 1. Each cell uses one cohort; repeated runs are needed to estimate bias."),
         ),
 
         ui.row(
@@ -539,87 +351,47 @@ advanced_ui = ui.navset_tab(
     )),
     ui.nav_panel('How it works', ui.tags.div(
         {"class": "cc-card"},
-        ui.h3("Overview"),
-        ui.p(
-            "This tutorial follows the Credence framework (Parikh et al., ICML 2022) to build "
-            "semi-synthetic datasets anchored at the empirical distribution, with a known causal contrast."
-        ),
+        ui.h3("Learn structure, choose mechanisms, check estimates"),
         ui.tags.ul(
-            ui.tags.li(
-                ui.strong("Observed confounding:"),
-                " learned from the empirical relationship ",
-                ui.tags.code("p(X|Z)"),
-                ui.HTML(". Only \\(p(X\\mid Z)\\) is learned from your data &mdash; the outcome "
-                        "mechanism and the effect are chosen by you in Step 3. How closely the "
-                        "generated covariates match the real ones is <strong>measured in "
-                        "Step 4</strong>, against rows the model never saw, rather than asserted "
-                        "here.")
-            ),
-            ui.tags.li(
-                ui.strong("Unobserved confounding:"),
-                ui.HTML(" injected via a latent variable "),
-                ui.tags.code("U"),
-                ui.HTML(" with tunable strength \\((\\rho)\\).")
-            ),
-            ui.tags.li(
-                ui.strong("Ground truth:"),
-                ui.HTML(" you set a baseline effect and optional heterogeneity. The actual cohort ATE is computed from the generated individual effects.")
-            ),
+            ui.tags.li(ui.strong("Learn: "), "A conditional VAE approximates p(X|Z) from source data."),
+            ui.tags.li(ui.strong("Choose: "), "You set assignment, the outcome equation, and treatment effects."),
+            ui.tags.li(ui.strong("Check: "), "Compare estimates with known truth and covariates with held-out source rows. "
+                       "Covariate fidelity does not validate the chosen causal mechanism."),
         ),
-
-        # Connection to Module 4
-        ui.tags.div(
-            {"class": "module-ref"},
-            ui.HTML("<strong>From Module 4:</strong> We used <code>simcausal</code> to generate data with parametric assumptions. "
-                    "Here, we use a CVAE to approximate the covariate structure of real data, "
-                    "then check held-out fidelity before using the synthetic benchmarks to evaluate TMLE and other methods.")
-        ),
-
-        # Math Notes Details
         ui.tags.details(
-            ui.tags.summary("Math notes"),
-            ui.tags.div(
-                {"class": "math-note"},
-                ui.HTML("\\(\\newcommand{\\E}{\\mathbb{E}}\\)"),
-                ui.p(ui.HTML("We use a Conditional Variational Autoencoder (VAE) to learn a deep generative model of the covariates, specifically modeling the complex distribution \\(p(X \\mid Z)\\). This VAE has two main parts:")),
-                ui.tags.ul(
-                    ui.tags.li(ui.HTML("<strong>The Encoder's Job (\\(q_\\phi(u \\mid x,z)\\)): Data → Latent Space</strong> <br> The encoder network is responsible for 'encoding' the data. It takes the original, high-dimensional <strong>covariates \\((x)\\)</strong> for a given treatment group \\((z)\\) and compresses this rich information into a new, lower-dimensional space called the <strong>latent space</strong>. The encoded representation of the data within this space is <strong>\\((u)\\)</strong>. The encoder's primary job is to find the most efficient summary of the data by learning a probability distribution for \\(u\\).")),
-                    ui.tags.li(ui.HTML("<strong>The Decoder's Job (\\(p_\\theta(x \\mid u,z)\\)): Latent Space → Data</strong> <br> The decoder network acts as the 'recipe' for reversing the process. It takes a point \\((u)\\) sampled from the latent space and translates it back into the original data format, reconstructing (or generating new) high-dimensional covariates \\((x)\\). This reconstruction is the decoder's job, effectively taking a compressed summary and turning it back into realistic data."))
-                ),
-                ui.p(ui.HTML("The VAE is trained by optimizing the ELBO (Evidence Lower Bound) loss function. This objective balances two critical goals: ensuring the decoded data is a faithful <strong>reconstruction</strong> of the original, while also <strong>regularizing</strong> the latent space to be smooth and well-behaved, which is crucial for generating new data.")),
-                ui.p("To create a simulation with a known 'ground truth' answer, we can then define the rules for this synthetic world:"),
-                ui.tags.ul(
-                    ui.tags.li(ui.HTML("<strong>Designed treatment assignment:</strong> \\(\\Pr(Z=1 \\mid X,U) = \\operatorname{logistic}(\\alpha + \\lambda m(X) + \\rho U)\\). The learned mechanism instead draws treatment before covariates.")),
-                    ui.tags.li(ui.HTML("<strong>Potential outcomes:</strong> \\(Y(0)=f(X)+\\gamma\\rho\\sigma_Y U+\\varepsilon\\), \\(Y(1)=Y(0)+\\tau(X)\\), and \\(\\tau(X)=\\tau_0+\\kappa\\sigma_Y m(X)\\). The reported cohort ATE is the average of these individual effects; it equals the baseline effect when heterogeneity is zero."))
-                )
-            )
+            ui.tags.summary("Conditional VAE"),
+            ui.p(ui.HTML("The encoder \\(q_\\phi(u \\mid x,z)\\) compresses covariates within treatment groups. "
+                         "The decoder \\(p_\\theta(x \\mid u,z)\\) reconstructs them and generates new covariates.")),
+            ui.p("Training balances reconstruction error with a penalty that keeps the latent distribution near a standard normal prior. "
+                 "This latent representation is separate from the hidden confounder U added during simulation."),
+            ui.p(ui.HTML("$$\\mathcal{L}(\\theta,\\phi) = \\mathbb{E}_{q_\\phi(u \\mid x,z)}[\\log p_\\theta(x \\mid u,z)] "
+                         "- \\mathrm{KL}(q_\\phi(u \\mid x,z) \\Vert p(u))$$")),
         ),
-
-        # ELBO Intuition Details
         ui.tags.details(
-            ui.tags.summary("ELBO Intuition"),
-            ui.tags.div(
-                {"class": "math-note"},
-                ui.p("The ELBO (Evidence Lower Bound) balances two goals:"),
-                ui.tags.ul(
-                    ui.tags.li("Reconstruction: How well the decoder recreates the input data."),
-                    ui.tags.li("Regularization: Ensures the latent space follows a standard normal distribution.")
-                ),
-                ui.p(ui.HTML("Mathematically: $$\\mathscr{L}(\\theta,\\phi) = \\mathbb{E}_{q_\\phi(u \\mid x,z)}[\\log p_\\theta(x \\mid u,z)] - \\mathrm{KL}(q_\\phi(u \\mid x,z) \\Vert p(u))$$")),
-                ui.p("Maximizing ELBO helps the model learn realistic data generation while keeping latent representations smooth and generalizable.")
-            )
-        ),
-
-        # Notation Details
-        ui.tags.details(
-            ui.tags.summary("Notation"),
+            ui.tags.summary("Simulation equations"),
+            ui.p(ui.HTML("<strong>Designed assignment:</strong> \\(\\Pr(Z=1 \\mid X,U) = "
+                         "\\operatorname{logistic}(\\alpha + \\lambda m(X) + \\rho U)\\). "
+                         "The learned mechanism instead draws treatment before covariates.")),
+            ui.p(ui.HTML("<strong>Potential outcomes:</strong> \\(Y(0)=f(X)+\\gamma\\rho\\sigma_Y U+\\varepsilon\\), "
+                         "\\(Y(1)=Y(0)+\\tau(X)\\), with \\(\\tau(X)=\\tau_0+\\kappa\\sigma_Y m(X)\\).")),
+            ui.p("The cohort ATE averages individual effects. It equals τ₀ when heterogeneity is zero."),
             ui.tags.ul(
-                ui.tags.li(ui.HTML("\\(X\\): covariates; \\(Z\\): binary treatment; \\(Y\\): outcome; \\(Y(0), Y(1)\\): potential outcomes.")),
-                ui.tags.li(ui.HTML("\\(U\\): unobserved confounder; \\(f(X)\\): baseline outcome function.")),
-                ui.tags.li(ui.HTML("\\(\\tau_0\\): baseline effect; \\(\\tau(X)\\): individual effect; \\(\\kappa\\): heterogeneity; \\(\\alpha\\): treatment-logit intercept; \\(\\rho\\): hidden-confounding strength.")),
-                ui.tags.li(ui.HTML("Encoder \\((q_\\phi(u \\mid x,z))\\), Decoder \\((p_\\theta(x \\mid u,z))\\); ELBO \\((\\mathscr{L}(\\theta,\\phi))\\)."))
-            )
+                ui.tags.li("X: measured covariates; Z: treatment; U: hidden confounder."),
+                ui.tags.li("f(X): baseline outcome index; m(X): training-centered modifier; σY: training-outcome SD."),
+                ui.tags.li("λ: overlap; ρ: hidden confounding; κ: heterogeneity; α: assignment intercept; γ = 0.5: hidden outcome coefficient."),
+            ),
         ),
+        ui.tags.details(
+            ui.tags.summary("Extend the comparison"),
+            ui.p("Use the observed-data export to compare other estimators, such as IPW, AIPW, or TMLE. "
+                 "Use the answer key only to score them. Repeat simulations to study bias, precision, and interval coverage."),
+            ui.p("Start with the causal question and identification assumptions, then choose an estimator. "
+                 "No estimator can recover information that the study design does not identify."),
+        ),
+        ui.h4("Framework reference"),
+        ui.p("Parikh et al. (2022). ",
+             ui.tags.a("Validating Causal Inference Methods", href="https://arxiv.org/abs/2202.04208", target="_blank"),
+             ". ICML. This app adapts the Credence framework for teaching."),
     )),
     id="advanced_step",
 )
@@ -658,8 +430,7 @@ def advanced_server(input, output, session):
         old = experiment.get()
         experiment.set(ExperimentSession(confirmed=old.confirmed, trained=old.trained, run=old.run))
 
-    # Load example data. The datasets themselves live in examples.py so the test
-    # suite exercises exactly what the workshop runs.
+    # UI and headless tests share the same example loaders.
     @reactive.Effect
     @reactive.event(input.load_example)
     def _():
@@ -688,7 +459,7 @@ def advanced_server(input, output, session):
         is_warning = note.startswith("NOT ") or note.startswith("Could not")
         colour = "#fd7e14" if is_warning else "#1c8b4a"
         return ui.tags.div(
-            {"class": "module-ref",
+            {"class": "teaching-note",
              "style": "border-left-color: {};".format(colour)},
             ui.HTML("<strong>{}</strong> {}".format(
                 "Heads up:" if is_warning else "Loaded:", note))
@@ -821,7 +592,7 @@ def advanced_server(input, output, session):
         fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
 
         axes[0].plot(epochs, [h['neg_elbo'] for h in history],
-                     color='#4A9EFF', linewidth=2)
+                     color='#2855a6', linewidth=2)
         axes[0].set_title('Negative ELBO per observation (lower is better)')
         axes[0].set_xlabel('Epoch')
 
@@ -899,8 +670,7 @@ def advanced_server(input, output, session):
                 {"class": "text-muted", "style": "font-size: 0.9em;"},
                 ui.HTML("Covariates are standardised before weighting, so these are "
                         "comparable across variables measured in different units. "
-                        "Equal weights is the default; the old code produced weights "
-                        "that were an accident of measurement scale.")
+                        "Equal weights are used here.")
             )
         )
 
@@ -950,16 +720,14 @@ def advanced_server(input, output, session):
                 ))
             ),
             ui.tags.div(
-                {"class": "module-ref", "style": "border-left-color: {};".format(colour)},
+                {"class": "teaching-note", "style": "border-left-color: {};".format(colour)},
                 ui.HTML("<strong>Verdict:</strong> {}".format(disc['interpretation']))
             ),
             ui.HTML(display.to_html(index=False, border=0,
                                     classes="table table-sm", justify="left")),
             ui.tags.p(
                 {"class": "text-muted", "style": "font-size: 0.9em;"},
-                ui.HTML("Sorted worst-first by |SMD|. Rows near the top are where the "
-                        "generator is least faithful &mdash; and therefore where a "
-                        "conclusion drawn here is least likely to transfer to your real data.")
+                ui.HTML("Sorted by |SMD|, largest first. Inspect covariates with the largest discrepancies.")
             )
         )
 
@@ -991,7 +759,7 @@ def advanced_server(input, output, session):
             ui.p(f"True cohort ATE: {comparison['truth'].iloc[0]:+.2f} outcome units."),
             ui.HTML(display.to_html(index=False, border=0, classes='table')),
             ui.p("Adjustment uses the exported measured covariates and a linear outcome model with "
-                 "treatment interactions. This model matches our chosen mechanism. These are point "
+                 "treatment interactions. It matches the outcome mechanism when hidden confounding is off. These are point "
                  "estimates from one cohort, not confidence intervals or repeated-run bias."),
         )
 
@@ -1015,8 +783,8 @@ def advanced_server(input, output, session):
 
         fig, ax = plt.subplots(figsize=(10, 5))
 
-        # Plot density for each treatment group with instats colors
-        for z_val, color, label in [(0, '#6c757d', 'Control'), (1, '#4A9EFF', 'Treated')]:
+        # Plot density by treatment group.
+        for z_val, color, label in [(0, '#6c757d', 'Control'), (1, '#2855a6', 'Treated')]:
             df_sub = df[df[z_col] == z_val][y_col]
             if len(df_sub) > 1 and df_sub.std() > 0:
                 df_sub.plot.density(ax=ax, color=color, alpha=0.7, label=label, linewidth=2)
@@ -1064,16 +832,14 @@ def advanced_server(input, output, session):
         display.columns = ['Overlap', 'Effect', 'Hidden bias', 'True ATE',
                            'Naive error', 'g-comp error', '% extreme', 'CATE r']
 
-        # Every sentence below is computed from the table, so the prose can never
-        # contradict the numbers it sits beside -- the same discipline the
-        # survcausal-pilot vignette applies to its own narrative.
+        # Summarize the displayed results.
         lines = summarize_grid(grid)
 
         return ui.TagList(
             ui.HTML(display.to_html(index=False, border=0,
                                     classes="table table-sm", justify="left")),
             ui.tags.div(
-                {"class": "module-ref"},
+                {"class": "teaching-note"},
                 ui.tags.ul(*[ui.tags.li(line) for line in lines])
             ),
             ui.tags.p(
@@ -1100,7 +866,7 @@ def advanced_server(input, output, session):
         return ui.download_button("download_grid", "Download Grid (.csv)", class_="btn-success")
 
     @session.download(
-        filename=lambda: f"credence_scenario_grid_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        filename=lambda: f"tao_rwd_scenario_grid_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
     )
     def download_grid():
         grid = experiment.get().grid
@@ -1111,7 +877,7 @@ def advanced_server(input, output, session):
 
     # Download handler
     @session.download(
-        filename=lambda: f"credence_instats_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        filename=lambda: f"tao_rwd_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
     )
     def download_data():
         df = (experiment.get().run['result']['data'] if experiment.get().run is not None else None)
@@ -1124,7 +890,7 @@ def advanced_server(input, output, session):
         yield csv_string
 
 
-    @session.download(filename=lambda: "credence_data_and_answers.zip", media_type="application/zip")
+    @session.download(filename=lambda: "tao_rwd_data_and_answers.zip", media_type="application/zip")
     def download_answers():
         run = experiment.get().run
         if run is not None:

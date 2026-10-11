@@ -1,12 +1,5 @@
-% Credence Development Log -- a companion seminar
-%
-% Style note: this deck deliberately matches tutorial/tutorial.tex (metropolis,
-% 16:9, accent #4A9EFF) so it reads as a companion to the Module 5 tutorial rather
-% than a separate document. The extended palette (slate / navorange / resultgreen /
-% softgray) is taken from the instats seminar preamble used by the workshop modules,
-% and the orange/green match the app's own CSS variables.
-%
-% Build:  latexmk -pdf devlog.tex     (from this folder)
+% Tao of RWD — historical development notes
+% Build: latexmk -pdf devlog.tex
 
 \documentclass[aspectratio=169]{beamer}
 
@@ -26,9 +19,9 @@
 \usetikzlibrary{positioning,arrows.meta,shapes.geometric,calc}
 
 \title[Credence dev log]{Building the Credence Capability}
-\subtitle{A development log that doubles as a seminar}
+\subtitle{Historical development notes}
 \author{Andy Wilson \enskip\textbar\enskip wilson.stats@gmail.com}
-\institute{}
+\institute{Tao of RWD \enskip\textbar\enskip tao-rwd.com}
 \date{}
 
 \definecolor{accent}{HTML}{4A9EFF}
@@ -46,7 +39,7 @@
 \setbeamertemplate{navigation symbols}{}
 \setbeamertemplate{footline}{}
 
-\hypersetup{colorlinks=true, urlcolor=accent, linkcolor=accent}
+\hypersetup{pdftitle={Tao of RWD | Credence development notes}, colorlinks=true, urlcolor=accent, linkcolor=accent}
 
 % A compact "what this bought us" stamp, used to close each dev-log entry.
 \newcommand{\payoff}[1]{%
@@ -93,7 +86,7 @@
 
   \vspace{0.6em}
   \textcolor{accent}{\textbf{Companion to:}} \texttt{tutorial/tutorial.pdf}
-  (Module 5, instats SSC 2026).
+  (Tao of RWD).
 \end{frame}
 
 % ----------------------------------------

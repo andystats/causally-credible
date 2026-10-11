@@ -64,3 +64,9 @@ body { background: #f7f9fb; color: var(--lab-ink); line-height: 1.55; }
   .compare-card, .explain-card { padding: 16px; }
   .nav-tabs { gap: 0; }
 }
+
+.lab-header > .eyebrow { text-transform: none; font-size: 1rem; letter-spacing: .02em; }
+
+/* Keep long equations scrollable within their card on narrow screens. */
+mjx-container { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+mjx-container:not([display="true"]) { display: inline-block; vertical-align: middle; }
